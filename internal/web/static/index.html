@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="same-origin">
+<meta name="color-scheme" content="dark light">
+<title>{{TITLE}}</title>
+<link rel="icon" href="/favicon.svg?v={{ASSET_TAG}}">
+<link rel="stylesheet" href="/style.css?v={{ASSET_TAG}}">
+</head>
+<body class="theme-dark">
+
+<!-- ================= 登录 ================= -->
+<div id="view-login" class="login-wrap" hidden>
+  <div class="login-bg" aria-hidden="true"></div>
+  <form class="login-card" id="login-form" autocomplete="on">
+    <div class="login-brand">
+      <svg viewBox="0 0 32 32" class="mark" aria-hidden="true">
+        <circle cx="16" cy="16" r="13" class="mark-ring"></circle>
+        <path d="M4 16h24M16 4c4 4 4 20 0 24M16 4c-4 4-4 20 0 24" class="mark-line"></path>
+        <circle cx="22" cy="9" r="3" class="mark-dot"></circle>
+      </svg>
+      <div>
+        <h1>{{TITLE}}</h1>
+        <p class="login-sub">VPN Gate 节点聚合 · 连通性测试 · IP 纯净度</p>
+      </div>
+    </div>
+    <label class="field">
+      <span>用户名</span>
+      <input id="login-user" name="username" type="text" autocomplete="username" spellcheck="false" required>
+    </label>
+    <label class="field">
+      <span>口令</span>
+      <input id="login-pass" name="password" type="password" autocomplete="current-password" required>
+    </label>
+    <div id="login-error" class="login-error" hidden></div>
+    <button class="btn btn-primary btn-block" type="submit" id="login-submit">登录</button>
+    <p class="login-hint">口令在服务端日志里（首次启动会自动生成），也可以在 config.json 的 auth.password 里自己设。</p>
+  </form>
+</div>
+
+<!-- ================= 主界面 ================= -->
+<div id="view-app" hidden>
+
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" class="mark" aria-hidden="true">
+        <circle cx="16" cy="16" r="13" class="mark-ring"></circle>
+        <path d="M4 16h24M16 4c4 4 4 20 0 24M16 4c-4 4-4 20 0 24" class="mark-line"></path>
+        <circle cx="22" cy="9" r="3" class="mark-dot"></circle>
+      </svg>
+      <div class="brand-text">
+        <strong id="brand-title">{{TITLE}}</strong>
+        <small>v{{VERSION}} · <span id="conn-state" class="conn conn-idle">连接中</span></small>
+      </div>
+    </div>
+
+    <nav class="tabs" id="tabs" aria-label="页面">
+      <button class="tab is-active" type="button" data-act="tab" data-tab="overview" id="tab-overview">总览</button>
+      <button class="tab" type="button" data-act="tab" data-tab="nodes" id="tab-nodes">节点列表</button>
+    </nav>
+
+    <div class="search">
+      <input id="search" type="search" placeholder="搜索节点名 / IP / 运营商 / 国家 / ASN…" spellcheck="false" autocomplete="off">
+      <kbd>/</kbd>
+    </div>
+
+    <div class="actions">
+      <button class="btn btn-ghost" data-act="refresh" title="重新拉取全部节点源">刷新源</button>
+      <button class="btn btn-ghost" data-act="probe" title="按当前筛选测试节点连通性">批量测试</button>
+      <button class="btn btn-ghost" data-act="purity" title="扫描 IP 纯净度">纯净度扫描</button>
+      <button class="btn btn-ghost" data-act="export" title="导出当前筛选/选中的 .ovpn">导出</button>
+      <button class="btn btn-icon" data-act="settings" title="设置" aria-label="设置">⚙</button>
+      <button class="btn btn-icon" data-act="theme" title="切换主题" aria-label="切换主题">☾</button>
+      <button class="btn btn-icon" data-act="logout" title="退出登录" aria-label="退出登录">⎋</button>
+    </div>
+  </header>
+
+  <main class="main">
+
+    <!-- 统计卡片 -->
+    <section class="cards" id="cards" aria-label="总览">
+      <article class="card card-accent"><header>池内节点</header><div class="metric" id="m-nodes">–</div><footer id="m-nodes-sub">–</footer></article>
+      <article class="card card-link" data-act="card" data-card="alive" title="打开节点列表，状态筛选选「稳定 + 可达」"><header>可达节点</header><div class="metric" id="m-alive">–</div><footer id="m-alive-sub">–</footer></article>
+      <article class="card card-link" data-act="card" data-card="ping" title="打开节点列表，按延迟从低到高排"><header>中位延迟</header><div class="metric" id="m-ping">–</div><footer id="m-ping-sub">–</footer></article>
+      <article class="card card-link" data-act="card" data-card="purity" title="打开节点列表，只看已有纯净度结论的，按纯净度排"><header>中位纯净度</header><div class="metric" id="m-purity">–</div><footer id="m-purity-sub">–</footer></article>
+      <article class="card card-link" data-act="card" data-card="res" title="打开节点列表，只看志愿者家宽"><header>家宽占比</header><div class="metric" id="m-res">–</div><footer id="m-res-sub">–</footer></article>
+      <article class="card card-link" data-act="card" data-card="countries" title="打开节点列表（不加筛选）；要按国家筛就在地图上点国家"><header>国家 / 协议</header><div class="metric" id="m-countries">–</div><footer id="m-countries-sub">–</footer></article>
+    </section>
+
+    <!-- ============ 总览页：左国家分布图，右数据源与任务 ============ -->
+    <div class="home-grid" id="view-overview">
+
+    <!-- 国家分布（气泡图） -->
+    <section class="panel panel-map" id="map-panel">
+      <div class="panel-head">
+        <h2>国家分布</h2>
+        <div class="panel-tools">
+          <div class="seg" id="map-metric" role="group" aria-label="地图按哪个指标上色">
+            <button class="seg-btn is-active" type="button" data-act="map-metric" data-metric="nodes" title="气泡大小和颜色都按这个国家的节点数">节点数</button>
+            <button class="seg-btn" type="button" data-act="map-metric" data-metric="alive" title="颜色按可达比例：这个国家的节点有多少真连得上">可达率</button>
+            <button class="seg-btn" type="button" data-act="map-metric" data-metric="res" title="颜色按志愿者家宽占比">家宽占比</button>
+            <button class="seg-btn" type="button" data-act="map-metric" data-metric="ping" title="颜色按中位延迟，越低越绿">中位延迟</button>
+          </div>
+        </div>
+      </div>
+      <div class="map-wrap" id="map" aria-label="按国家的节点分布气泡图"></div>
+      <div class="map-rank" id="map-rank" aria-label="按当前指标的国家排行"></div>
+      <div class="map-legend" id="map-legend"></div>
+    </section>
+
+    <!-- 数据源与任务进展 -->
+    <section class="panel panel-pipeline" id="pipeline">
+      <div class="panel-head">
+        <h2>数据源与任务</h2>
+        <div class="panel-tools">
+          <span class="muted" id="pipeline-updated">–</span>
+        </div>
+      </div>
+      <div class="pipeline">
+        <div class="sources" id="sources"></div>
+        <div class="jobs" id="jobs"></div>
+      </div>
+    </section>
+
+    </div><!-- /home-grid -->
+
+    <!-- ============ 节点列表页 ============ -->
+    <div class="nodes-view" id="view-nodes" hidden>
+
+    <!-- 筛选 -->
+    <section class="filters" id="filters">
+      <div class="filter-row">
+        <label class="mini">国家
+          <select id="f-country" multiple size="1"></select>
+        </label>
+        <label class="mini">协议
+          <select id="f-proto" multiple size="1">
+            <option value="tcp">TCP</option><option value="udp">UDP</option>
+          </select>
+        </label>
+        <label class="mini">状态
+          <select id="f-level" multiple size="1">
+            <option value="stable">稳定</option>
+            <option value="reachable">可达</option>
+            <option value="unknown">未知</option>
+            <option value="flaky">抖动</option>
+            <option value="down">不可达</option>
+            <option value="untested">未测</option>
+          </select>
+        </label>
+        <label class="mini">排序
+          <select id="f-sort">
+            <option value="recommend">推荐分</option>
+            <option value="ping">延迟</option>
+            <option value="purity">纯净度</option>
+            <option value="score">官方分数</option>
+            <option value="speed">官方速度</option>
+            <option value="sessions">会话数</option>
+            <option value="cf">Cloudflare 观测</option>
+            <option value="tests">测试次数</option>
+            <option value="seen">最近出现</option>
+            <option value="hostname">名称</option>
+          </select>
+        </label>
+        <button class="btn btn-icon" id="f-dir" data-dir="asc" title="切换升/降序">↑</button>
+        <label class="mini" title="默认只看本机实测：没测过的写「待测试」，测了但没连上写「未测出延迟」。官方 Ping 和 Cloudflare 观测要显式选才用（它们不代表你这张网）。">
+          延迟口径
+          <select id="f-ping-src">
+            <option value="best">本机实测（EWMA）</option>
+            <option value="local">本机实测（最近一次）</option>
+            <option value="upstream">官方 Ping</option>
+            <option value="cloudflare">Cloudflare 观测</option>
+          </select>
+        </label>
+        <label class="mini num">纯净度 ≥
+          <input id="f-min-purity" type="number" min="0" max="100" step="5" placeholder="0">
+        </label>
+        <label class="mini num" title="按上面选的延迟口径筛；已判定不可达的节点不参与，它那个历史延迟数不作数">延迟 ≤
+          <input id="f-max-ping" type="number" min="0" step="50" placeholder="ms">
+        </label>
+        <label class="switch"><input type="checkbox" id="f-residential"><span>只看志愿者家宽</span></label>
+        <label class="switch"><input type="checkbox" id="f-fresh"><span>只在本轮官方名单</span></label>
+        <label class="switch"><input type="checkbox" id="f-purity-only"><span>已有纯净度结论</span></label>
+        <button class="btn btn-ghost btn-sm" id="f-reset">重置</button>
+      </div>
+      <div class="chips" id="active-chips"></div>
+    </section>
+
+    <!-- 节点表 -->
+    <section class="table-wrap">
+      <table class="nodes" id="nodes-table">
+        <thead>
+          <tr>
+            <th class="col-check"><input type="checkbox" id="check-all" title="全选本页"></th>
+            <th data-sort="hostname">节点</th>
+            <th data-sort="purity">纯净度</th>
+            <th>国家</th>
+            <th>端点</th>
+            <th data-sort="ping" title="只看本机实测。没测过→待测试；测了没连上→未测出延迟；已判定不可达→不给延迟数也不参与这一列的排序">延迟</th>
+            <th data-sort="score">官方分</th>
+            <th data-sort="speed">速度</th>
+            <th data-sort="sessions">会话</th>
+            <th data-sort="seen">最近出现</th>
+            <th class="col-ops">操作</th>
+          </tr>
+        </thead>
+        <tbody id="nodes-body"></tbody>
+      </table>
+      <div class="empty" id="nodes-empty" hidden>
+        <div class="empty-mark">◇</div>
+        <p id="nodes-empty-text">没有符合条件的节点</p>
+        <p class="muted small">先点「刷新源」拉一轮，或者放宽筛选条件。</p>
+      </div>
+    </section>
+
+    <nav class="pager" id="pager">
+      <button class="btn btn-ghost btn-sm" id="pg-prev">上一页</button>
+      <span id="pg-info">–</span>
+      <button class="btn btn-ghost btn-sm" id="pg-next">下一页</button>
+      <label class="mini inline">每页
+        <select id="pg-size">
+          <option>50</option><option selected>100</option><option>200</option><option>500</option>
+        </select>
+      </label>
+      <span class="muted" id="pg-selected"></span>
+      <button class="btn btn-ghost btn-sm" data-act="probe-selected">测试选中</button>
+      <button class="btn btn-ghost btn-sm" data-act="purity-selected">纯净度选中</button>
+      <button class="btn btn-ghost btn-sm" data-act="export-selected">导出选中</button>
+    </nav>
+
+    </div><!-- /nodes-view -->
+  </main>
+</div>
+
+<!-- ================= 详情抽屉 ================= -->
+<div class="drawer-mask" id="drawer-mask" hidden></div>
+<aside class="drawer" id="drawer" hidden aria-label="节点详情">
+  <header class="drawer-head">
+    <div>
+      <h2 id="d-title">节点详情</h2>
+      <div class="muted small" id="d-sub"></div>
+    </div>
+    <button class="btn btn-icon" id="d-close" title="关闭" aria-label="关闭">✕</button>
+  </header>
+  <div class="drawer-body" id="drawer-body"></div>
+  <footer class="drawer-foot">
+    <button class="btn btn-ghost btn-sm" data-dact="probe">测一下</button>
+    <button class="btn btn-ghost btn-sm" data-dact="purity">查纯净度</button>
+    <button class="btn btn-ghost btn-sm" data-dact="copy">复制配置</button>
+    <button class="btn btn-primary btn-sm" data-dact="download">下载 .ovpn</button>
+  </footer>
+</aside>
+
+<!-- ================= 设置弹窗 ================= -->
+<div class="modal-mask" id="modal-mask" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <header class="modal-head">
+      <h2 id="modal-title">设置</h2>
+      <button class="btn btn-icon" id="modal-close" aria-label="关闭">✕</button>
+    </header>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<!-- 全局提示 -->
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<!-- 任务进度条 -->
+<div class="progressbar" id="progressbar" hidden>
+  <div class="bar" id="progress-bar"></div>
+  <span id="progress-text">–</span>
+  <button class="btn btn-ghost btn-xs" id="progress-cancel">取消</button>
+</div>
+
+<script src="/world-map.js?v={{ASSET_TAG}}" defer></script>
+<script src="/app.js?v={{ASSET_TAG}}" defer></script>
+</body>
+</html>

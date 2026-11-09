@@ -1,0 +1,17 @@
+# 运行时的状态（节点池、配置正文、纯净度缓存、凭据）都是本地数据，不入库。
+/data/
+/bin/
+/dist/
+/coverage.out
+*.tmp
+
+# go build 不带 -o 时会把二进制丢在仓库根目录，别让它混进来。
+/vpngate-agg
+
+# 本机配置可能带真实口令和 API key；example 那份才入库。
+config.json
+
+# pi 的本地目录
+.unipi/
+
+*.log

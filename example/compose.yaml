@@ -1,0 +1,58 @@
+# docker compose 起 vpngate-agg。
+#
+#   cd example && docker compose up -d --build
+#   docker compose logs -f vpngate-agg   # 没设口令时，随机口令打在日志里
+#
+# 数据放在 named volume（vpngate-data）里最省事：容器里的目录属主是 10001，
+# named volume 会继承镜像里的属主，所以能直接写。
+# 如果改用 bind mount（- ../data:/data），记得先把宿主目录 chown 10001:10001，
+# 否则进程会报「创建数据目录失败 / permission denied」。
+services:
+  vpngate-agg:
+    build:
+      context: ..
+    image: vpngate-agg:latest
+    container_name: vpngate-agg
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - vpngate-data:/data
+      # 想用固定的 config.json（比环境变量能调的东西多），把它放进 /data：
+      # 镜像里 VPNGATE_AGG_CONFIG 就指向 /data/config.json。
+      # - ../config.json:/data/config.json:ro
+    environment:
+      VPNGATE_AGG_TITLE: "VPN Gate 节点聚合中心"
+      # 不设就用随机口令（启动日志里能看到）；也可以事先 ./vpngate-agg passwd 生成。
+      VPNGATE_AGG_PASSWORD: "改成你自己的口令"
+      # 前面挂了 https 反代（TLS 在反代结束也算）时打开，Cookie 才带 Secure。
+      VPNGATE_AGG_COOKIE_SECURE: "false"
+      VPNGATE_AGG_REFRESH_MINUTES: "60"
+      # 探测每 6 小时测完整个池子（一轮后再隔 1 小时自动补测一轮「说不清」的 TCP 节点）。
+      # 填小会让每轮都重测上千个节点，上游和自己都累；真要更勤，建议改小 refresh、保持这里 360。
+      VPNGATE_AGG_PROBE_INTERVAL: "360"
+      # 第三方名单（vpngate-list-mirror 镜像出来的，不是官方）默认关；
+      # 想让它多出来的历史节点和 Cloudflare 观测进来，就改成 "true"（界面设置页也能开）。
+      # VPNGATE_AGG_CDN_ENABLED: "true"
+      # 官方自营机房节点（public-vpn-* / 219.100.37.0/24）默认不保留：那是 SoftEther
+      # 官方自己的机房出口，不是志愿者家宽。要全局出口稳定就改 "true"（设置页也有开关）。
+      # VPNGATE_AGG_KEEP_VPNGATE_OWN: "true"
+      # IP 纯净度的收费来源是「有 key 才启用」，不给 key 就用免费源。
+      IPQUERY_KEY: ""
+      IPINFO_TOKEN: ""
+      SCAMALYTICS_KEY: ""
+      IPQUALITYSCORE_KEY: ""
+      IPREGISTRY_KEY: ""
+      ABUSEIPDB_KEY: ""
+      # 对外只读接口 GET /vpngate/api/iphone/（字段名对齐官方 /api/iphone/）。
+      # 默认关着；enabled=true 而 token 为空会直接拒绝启动，宁可起不来也不裸开。
+      # token 生成：openssl rand -hex 24（不要把明文写进 compose 文件，用 .env 或 secrets）。
+      # VPNGATE_AGG_API_ENABLED: "true"
+      # VPNGATE_AGG_API_TOKEN: ""
+      # VPNGATE_AGG_API_INCLUDE_CONFIG: "true"   # false 就不给 OpenVPN_ConfigData_Base64 这一列
+      # VPNGATE_AGG_API_MAX_NODES: "500"         # 单次上限，更大用 offset 翻页
+      # VPNGATE_AGG_API_RATE_PER_MIN: "30"       # 按来源 IP 限流，0=不限
+      TZ: Asia/Shanghai
+
+volumes:
+  vpngate-data:

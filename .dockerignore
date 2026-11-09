@@ -1,0 +1,16 @@
+# 构建镜像只需要源码。这些排掉，既省上下文也避免把本机状态带进镜像。
+.git
+.gitignore
+.unipi/
+data/
+bin/
+dist/
+example/
+coverage.out
+*.tmp
+*.log
+*.md
+Makefile
+Dockerfile
+# 本机配置里可能有真实口令和 API key，别打进镜像。
+config.json

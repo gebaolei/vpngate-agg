@@ -1,0 +1,91 @@
+{
+  "_comment": "复制成 config.json 再改。所有字段都可以省略，省略即用内置默认值（这份就是默认值）；含义见 README.md 的「配置项」。用 -config 指定别的路径，或设环境变量 VPNGATE_AGG_CONFIG。",
+  "_auth": "auth.password 留空则启动时生成随机口令打在日志里；写明文也行，首次启动会转成 PBKDF2 存进 credentials.json。固定口令推荐用 vpngate-agg passwd 或界面里的改密码。",
+  "listen": ":8080",
+  "data_dir": "data",
+  "title": "VPN Gate 节点聚合中心",
+  "log_level": "info",
+  "auth": {
+    "username": "admin",
+    "password": "",
+    "session_hours": 168,
+    "cookie_secure": false,
+    "disable_auth": false
+  },
+  "sources": {
+    "_comment": "默认只拉官方：主站 API + sites.aspx 上列出的全部镜像站（按 /24 去重后每轮全抓，max_mirrors=0 就是「全抓」）。cdn 段是第三方项目 vpngate-list-mirror 镜像出来的名单，不是 VPN Gate 官方，默认关掉；想要它多出来的节点和 Cloudflare 观测，就在界面设置页打开，或者这里写 enabled: true。",
+    "_ui": "源开关、保留机房节点、keep_days、purge_fail_rounds、探测开关/间隔/并发/两个超时、纯净度开关与每分钟限流，在界面设置页也能改（节点配置 / 可用性探查 / IP 纯净度检查 三块）；其余只在这里改，改完重启。",
+    "_purge": "淘汰规则：本轮名单里没有的节点先留 keep_days 天；TCP 节点缺席满 purge_absent_hours，且连续 purge_fail_rounds 轮明确失败（refused / unreachable / blocked）就提前剔除。超时和不回包不算明确失败，UDP 也不提前剔除（它本来就不回包）。",
+    "refresh_interval_minutes": 60,
+    "keep_days": 7,
+    "purge_absent_hours": 24,
+    "purge_fail_rounds": 3,
+    "_own": "自营机房节点：hostname public-vpn-* 或落在 219.100.37.0/24（SoftEther 官方放在学术网里的机器）。默认 false = 不保留，因为要家宽出口的人不想要它；打开就留着换全局出口稳定。关掉后新抓的不进池，池里已有的下一轮清掉。",
+    "keep_vpngate_own": false,
+    "vpngate": {
+      "enabled": true,
+      "timeout_seconds": 35,
+      "min_nodes": 20,
+      "max_drop_pct": 50,
+      "allow_private_ips": false
+    },
+    "mirrors": {
+      "enabled": true,
+      "sites_page": "https://www.vpngate.net/en/sites.aspx",
+      "max_mirrors": 0,
+      "list_max_hours": 12,
+      "timeout_seconds": 30,
+      "min_nodes": 20
+    },
+    "cdn": {
+      "enabled": false,
+      "repo": "GeorgeXie2333/vpngate-list-mirror",
+      "index_url": "https://raw.githubusercontent.com/GeorgeXie2333/vpngate-list-mirror/main/latest.json",
+      "cdn_base": "https://cdn.jsdelivr.net/gh/GeorgeXie2333/vpngate-list-mirror@",
+      "fallback_raw": true,
+      "use_pool": true,
+      "pool_max_age_hours": 72,
+      "max_nodes": 1500,
+      "timeout_seconds": 60
+    },
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+  },
+  "probe": {
+    "_comment": "默认每 6 小时测完整个池子（selection=all，不是只测本轮新名单）；一轮跑完再隔 unknown_retry_minutes 分钟补测一轮「说不清」的 TCP 节点，补测轮不计入淘汰用的连负轮数。",
+    "enabled": true,
+    "interval_minutes": 360,
+    "concurrency": 64,
+    "tcp_timeout_seconds": 5,
+    "udp_timeout_seconds": 4,
+    "handshake_seconds": 4,
+    "handshake": true,
+    "retries": 1,
+    "history_keep": 8,
+    "max_nodes_per_round": 2000,
+    "selection": "all",
+    "unknown_retry_minutes": 60,
+    "skip_down_for_hours": 12
+  },
+  "purity": {
+    "_comment": "keys 也能用环境变量给：IPQUERY_KEY / IPINFO_TOKEN / SCAMALYTICS_KEY / IPQUALITYSCORE_KEY / IPREGISTRY_KEY / ABUSEIPDB_KEY。免费的来源默认开，要 key 的有了 key 才开；providers 里显式写 true/false 优先。",
+    "enabled": true,
+    "interval_minutes": 720,
+    "ttl_hours": 168,
+    "concurrency": 6,
+    "requests_per_minute": 40,
+    "min_providers": 1,
+    "max_nodes_per_round": 800,
+    "selection": "unchecked",
+    "raw_keep_bytes": 900,
+    "prefer_residential": true
+  },
+  "api": {
+    "_comment": "对外只读接口 GET /vpngate/api/iphone/：字段名对齐官方 https://www.vpngate.net/api/iphone/ 的 15 列，调用方换个 host 就能用。默认关着；enabled=true 而 token 为空会直接拒绝启动（宁可起不来也不把接口裸开，库里连 .ovpn 正文都有）。token 至少 16 字符，生成一个：openssl rand -hex 24。",
+    "_ui": "这一组不在界面设置页里改：对外接口的开关和凭据只在这里（或环境变量）配，改完重启。",
+    "enabled": false,
+    "token": "",
+    "include_config": true,
+    "max_nodes": 500,
+    "rate_per_minute": 30
+  }
+}

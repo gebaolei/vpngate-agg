@@ -1,0 +1,57 @@
+# systemd 单元示例。装好二进制、配置和数据目录后：
+#
+#   sudo install -m 755 bin/vpngate-agg /usr/local/bin/
+#   sudo useradd -r -m -d /var/lib/vpngate-agg -s /usr/sbin/nologin vpngate
+#   sudo install -d -o vpngate -g vpngate /var/lib/vpngate-agg
+#   sudo install -m 600 -o vpngate -g vpngate config.example.json /etc/vpngate-agg/config.json
+#   sudo cp example/vpngate-agg.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now vpngate-agg
+#   journalctl -u vpngate-agg -f        # 没设口令时随机口令在日志里
+#
+# 注意 ProtectSystem=strict 会把整个文件系统挂成只读，只有 ReadWritePaths
+# 里列的目录可写 —— 数据目录必须在里面，否则连池子都存不下来。
+[Unit]
+Description=vpngate-agg —— VPN Gate 节点聚合 / 连通测试 / IP 纯净度
+Documentation=https://github.com/gebaolei/vpngate-agg
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vpngate
+Group=vpngate
+WorkingDirectory=/var/lib/vpngate-agg
+# -config 放在子命令前后都行，这里放前面更直观。
+ExecStart=/usr/local/bin/vpngate-agg -config /etc/vpngate-agg/config.json serve
+Environment=VPNGATE_AGG_LISTEN=:8080
+Environment=VPNGATE_AGG_DATA_DIR=/var/lib/vpngate-agg
+# 收费来源的 key 也可以放这里（或者 /etc/vpngate-agg/vpngate-agg.env 里用 EnvironmentFile=）。
+# Environment=IPINFO_TOKEN=
+# 对外只读接口（字段名对齐官方 /api/iphone/）。token 写在 EnvironmentFile= 里比写在这里好，
+# enabled=true 而 token 为空会直接拒绝启动。
+# Environment=VPNGATE_AGG_API_ENABLED=true
+# Environment=VPNGATE_AGG_API_TOKEN=
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+# 探测一轮要开几千个 socket，默认 1024 不够用。
+LimitNOFILE=65536
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/vpngate-agg
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+# 监听 1024 以下端口时取消下一行注释（否则非 root 绑不上）。
+# AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
