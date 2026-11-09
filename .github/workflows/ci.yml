@@ -1,0 +1,85 @@
+# 日常提交的红绿灯：格式、vet、单元测试，外加一份能直接跑的快照二进制。
+#
+# 正式版本走 .github/workflows/release.yml（打 v* tag 才发 Release），
+# 这里只把 main 上的一次构建当快照存起来，方便「我想先试试最新代码」。
+#
+# 编译/打包的命令和 Makefile 完全一致（make fmt-check / vet / test / build-linux），
+# 不在 YAML 里另写一套 go build —— 否则本地能过、CI 红了都不知道差在哪。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同一个分支上连推几次，旧的直接取消：只关心最新一次是否绿。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: 检查（gofmt / vet / 测试）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Go 版本跟着 go.mod 走（go.mod 写 1.26 就用 1.26），
+      # 免得这里硬编一个版本，将来 go.mod 升级时 CI 悄悄落后。
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 顺序有讲究：格式和 vet 是秒级失败，先跑；测试最慢放最后。
+      - name: gofmt
+        run: make fmt-check
+
+      - name: vet
+        run: make vet
+
+      - name: 单元测试
+        run: make test
+
+      # 想在提交里顺手查并发问题就把下面两行打开（探测、SSE、限流都是多线程，
+      # 值得偶尔跑一次；代价是慢几倍，所以默认关着）。
+      # - name: 竞态检测
+      #   run: make race
+
+  snapshot:
+    name: 编译快照（linux/amd64）
+    needs: check
+    # PR 上只跑检查不产快照：快照的下载入口只从 main 的 run 里进。
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Makefile 里 VERSION := git describe --tags --always --dirty。
+          # 默认浅克隆看不到 tag（甚至看不到历史），版本会退化成 commit sha，
+          # 快照文件名和 `version` 输出就跟着一起骗人。
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 编译
+        run: make build-linux
+
+      # 当场自检：连 version 都打不出来的产物不值得上传。
+      - name: 自检
+        run: ./bin/vpngate-agg-linux-amd64 version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vpngate-agg-snapshot-linux-amd64
+          path: bin/vpngate-agg-linux-amd64
+          if-no-files-found: error
+          retention-days: 30

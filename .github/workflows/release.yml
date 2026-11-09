@@ -1,0 +1,174 @@
+# 发版：打一个 v* tag 就把 6 个平台的产物编译好、打包、挂到 GitHub Release 上。
+#
+#   git tag v0.2.0 && git push --tags        # 正式版本
+#   git tag v0.3.0-rc1 && git push --tags    # 带 - 的自动标成 prerelease
+#
+# 也可以在 Actions 页面手动跑（workflow_dispatch）：那种情况下必须填版本号，
+# 因为 gh release create 会顺手建 tag，用一个 commit sha 当 tag 太容易被当成正式版。
+#
+# 编译和打包全部走 Makefile（make package），平台清单在 Makefile 的 PLATFORMS 里；
+# 想加平台只改那一行，这里不用动。Docker 镜像不在这里构建，本地 make docker。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 版本号 / tag（例：v0.2.0）。留空则拒绝发版。
+        required: false
+        default: ''
+
+permissions:
+  contents: write   # 建 Release、传附件、必要时建 tag
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false   # 发版跑到一半被取消会留下半份 Release，不许取消
+
+jobs:
+  release:
+    name: 交叉编译并发布
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 关键：Makefile 里 VERSION := git describe --tags --always --dirty。
+          # 浅克隆看不到那个 tag，版本会退化成 commit sha，
+          # 于是文件名、`version` 输出、Release 标题三处一起错。
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 发版前先过一遍本地同款检查：格式和测试都红着就别浪费一次发版。
+      - name: 检查
+        run: make check
+
+      - name: 决定版本号和 tag
+        id: ver
+        env:
+          # 用 env 传输入，不往 shell 里拼 ${{ }}：避免版本号里带引号时把脚本搅乱。
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            if [ -z "$INPUT_VERSION" ]; then
+              echo "手动触发必须填 version（例 v0.2.0）；或者干脆 git tag v0.2.0 && git push --tags" >&2
+              exit 1
+            fi
+            tag="$INPUT_VERSION"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+          # tag 就是版本号：产物名会是 vpngate-agg-v0.2.0-linux-amd64.tar.gz。
+          if [ -z "$tag" ]; then echo "版本号为空，拒绝往下走" >&2; exit 1; fi
+          case "$tag" in
+            *[!A-Za-z0-9._-]*) echo "版本号只能含字母数字和 . _ -，实得 $tag" >&2; exit 1 ;;
+          esac
+          {
+            echo "tag=$tag"
+            echo "version=$tag"
+            # 带 - 的（v0.3.0-rc1 / -beta2）按 semver 就是预发布，别占住 latest。
+            case "$tag" in *-*) echo "prerelease=true" ;; *) echo "prerelease=false" ;; esac
+          } >> "$GITHUB_OUTPUT"
+          echo "版本号 $tag（prerelease 看带不带 -）"
+
+      - name: 编译 + 打包（6 个平台）
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          # 这一行不是客套：VERSION 一旦为空，产物会变成 vpngate-agg--linux-amd64，
+          # 后面的「产物齐不齐」和 grep 自检都会假绿。
+          : "${VERSION:?版本号没定下来，前一步出了问题}"
+          make package VERSION="$VERSION"
+
+      - name: 产物齐不齐
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          : "${VERSION:?版本号没定下来，前一步出了问题}"
+          missing=0
+          for p in linux/amd64 linux/arm64 linux/arm darwin/arm64 darwin/amd64 windows/amd64; do
+            os=${p%/*}; arch=${p#*/}
+            if ! ls "dist/archives/vpngate-agg-${VERSION}-${os}-${arch}".* >/dev/null 2>&1; then
+              echo "缺 ${os}/${arch} 的包"; missing=1
+            fi
+          done
+          [ "$missing" = 0 ] || exit 1
+          ls -l dist/archives/
+
+      - name: 校验值能对上
+        run: cd dist/archives && sha256sum -c SHA256SUMS
+
+      # 自检：把 linux/amd64 那份解开真跑一次。版本号没注入、或者内嵌的静态资源
+      # 坏了，这里就直接红，而不是把一份骗人的产物挂到 Release 上。
+      - name: 自检（解包跑 version）
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          : "${VERSION:?版本号没定下来，前一步出了问题}"
+          mkdir -p /tmp/rel
+          tar -xzf "dist/archives/vpngate-agg-${VERSION}-linux-amd64.tar.gz" -C /tmp/rel
+          /tmp/rel/vpngate-agg version
+          # grep 的 -F 遇上空串是恒真，所以先确认非空再比。
+          /tmp/rel/vpngate-agg version | grep -F -- "$VERSION"
+
+      - name: 写发版说明
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          : "${VERSION:?版本号没定下来，前一步出了问题}"
+          # 全部用单引号 printf：双引号里的反引号会被当命令替换跑掉（说明里的
+          # `xxx` 全变空串），heredoc 又会被 YAML 块缩进搞断。单引号两个坑都避开。
+          {
+            printf '%s\n' \
+              '单二进制，Web 界面已经内嵌，下载解开就能跑。数据在 `-data_dir`（默认 `./data`），' \
+              '配置见 `config.example.json`，对外只读接口见 docs/API.md。' \
+              '' '```bash'
+            printf 'tar -xzf vpngate-agg-%s-linux-amd64.tar.gz && ./vpngate-agg serve\n' "$VERSION"
+            printf '%s\n' \
+              '```' '' '校验：和包同级跑 `sha256sum -c SHA256SUMS`。' '' \
+              '| 平台 | 包 |' '| --- | --- |'
+            for f in dist/archives/vpngate-agg-*; do
+              b=$(basename "$f")
+              printf '| %s | `%s` |\n' "${b#vpngate-agg-${VERSION}-}" "$b"
+            done
+            printf '\n子命令：`serve` / `refresh` / `probe` / `purity` / `export` / `passwd` / `sources`。\n'
+          } > dist/NOTES.md
+          cat dist/NOTES.md
+
+      - name: 发 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          PRERELEASE: ${{ steps.ver.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          pre=()
+          [ "$PRERELEASE" = true ] && pre=(--prerelease)
+
+          # 重跑同一个 tag 不该失败：已存在就覆盖附件、改说明，而不是报错退出。
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/archives/* dist/NOTES.md --clobber
+            gh release edit "$TAG" \
+              --title "vpngate-agg $VERSION" \
+              --notes-file dist/NOTES.md \
+              "${pre[@]}"
+          else
+            gh release create "$TAG" dist/archives/* dist/NOTES.md \
+              --target "$GITHUB_SHA" \
+              --title "vpngate-agg $VERSION" \
+              --notes-file dist/NOTES.md \
+              "${pre[@]}"
+          fi
+          gh release view "$TAG"

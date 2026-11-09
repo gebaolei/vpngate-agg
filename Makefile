@@ -5,6 +5,7 @@
 #   make test       单元测试
 #   make check      fmt + vet + test（提交前跑这个）
 #   make release    交叉编译几套平台到 dist/
+#   make package    交叉编译 + 打包成 dist/archives/*.tar.gz（发 Release 用）
 #   make docker     构建镜像
 
 GO       ?= go
@@ -18,7 +19,7 @@ PLATFORMS := linux/amd64 linux/arm64 linux/arm darwin/arm64 darwin/amd64 windows
 
 .DEFAULT_GOAL := build
 
-.PHONY: build build-linux test race cover vet fmt fmt-check tidy check run docker docker-run clean release help
+.PHONY: build build-linux test race cover vet fmt fmt-check tidy check run docker docker-run clean release package help
 
 build: ## 编译当前平台
 	@mkdir -p bin
@@ -78,6 +79,27 @@ release: ## 交叉编译多平台到 dist/
 	done
 	@cd dist && sha256sum vpngate-agg-* > SHA256SUMS 2>/dev/null || shasum -a 256 vpngate-agg-* > SHA256SUMS
 	@cat dist/SHA256SUMS
+
+## 发布产物
+package: release ## 交叉编译 + 打包成 dist/archives/*.tar.gz（windows 优先 zip），发 Release 用的就是这一条
+	@mkdir -p dist/archives
+	@rm -f dist/archives/*
+	@for p in $(PLATFORMS); do \
+		os=$${p%/*}; arch=$${p#*/}; ext=""; [ "$$os" = windows ] && ext=".exe"; \
+		bin="dist/vpngate-agg-$(VERSION)-$$os-$$arch$$ext"; \
+		[ -f "$$bin" ] || { echo "缺编译产物 $$bin"; exit 1; }; \
+		stage="$$(mktemp -d)"; cp "$$bin" "$$stage/vpngate-agg$$ext"; cp README.md "$$stage/"; \
+		name="dist/archives/vpngate-agg-$(VERSION)-$$os-$$arch"; \
+		if [ "$$os" = windows ] && command -v zip >/dev/null 2>&1; then \
+			(cd "$$stage" && zip -qr "$(OLDPWD)/$$name.zip" .); \
+		else \
+			tar -czf "$$name.tar.gz" -C "$$stage" .; \
+		fi; \
+		rm -rf "$$stage"; \
+		echo "→ $$name"; \
+	done
+	@cd dist/archives && sha256sum vpngate-agg-* > SHA256SUMS 2>/dev/null || shasum -a 256 vpngate-agg-* > SHA256SUMS
+	@echo "打包完成，校验值在 dist/archives/SHA256SUMS"
 
 clean:
 	rm -rf bin dist coverage.out

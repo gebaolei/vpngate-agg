@@ -38,6 +38,15 @@ VPN Gate 官方接口有几个不太好用的地方，这个工具把它们补�
 
 ### 二进制
 
+懒人路径：仓库的 [Releases](https://github.com/gebaolei/vpngate-agg/releases) 里有编好的 6 个平台包（linux amd64/arm64/arm、darwin arm64/amd64、windows amd64），解开就跑：
+
+```bash
+tar -xzf vpngate-agg-v0.2.0-linux-amd64.tar.gz && ./vpngate-agg serve
+sha256sum -c SHA256SUMS          # 同一级目录下跑
+```
+
+自己编：
+
 ```bash
 make build                      # → bin/vpngate-agg
 ./bin/vpngate-agg serve
@@ -454,6 +463,26 @@ HTTPS 下记得设 `auth.cookie_secure = true`（或 `VPNGATE_AGG_COOKIE_SECURE=
 ```
 
 cron 模式下每次 `probe` 都算「一轮」，所以淘汰里的「连续 3 轮明确失败」是按这里跑了几次算的，不是按 6 小时 —— 上例每小时一次，等于 3 小时就够格提前剔除。嫌太激进就把 `-limit` 调大、间隔拉长，或者干脆常驻 `serve` 用默认的 6 小时节奏。
+
+## 构建与发版
+
+编译和打包的命令全在 Makefile 里，CI 只是调它们（不在 YAML 里另写一套 `go build`，否则本地能过、CI 红了都不知道差在哪）：
+
+| 动作 | 命令 / 触发 | 结果 |
+| --- | --- | --- |
+| 提交前自查 | `make check` | gofmt + vet + `go test -count=1` |
+| CI | push 到 `main` 或提 PR（`.github/workflows/ci.yml`） | 跑 `make fmt-check / vet / test`；`main` 上还产一份 linux/amd64 快照 artifact（保留 30 天） |
+| 多平台打包 | `make package` | `dist/archives/` 里 6 个包 + `SHA256SUMS`（windows 有 `zip` 就出 `.zip`，否则也走 tar.gz） |
+| 发版 | `git tag v0.2.0 && git push --tags`（`.github/workflows/release.yml`） | 交叉编译 + 打包 + 建 GitHub Release（附件、校验值、发版说明） |
+
+发版这几条值得记住：
+
+- **版本号来自 tag**，通过 `-X main.version` 注入（`VERSION := git describe --tags`）。两个 workflow 都用了 `fetch-depth: 0`：浅克隆看不到 tag，版本会退化成 commit sha，文件名、`version` 输出、Release 标题三处一起骗人。
+- tag 里带 `-`（`v0.3.0-rc1`）按 semver 就是预发布，会自动标成 prerelease，不占住 latest。
+- 重跑同一个 tag 不会失败：附件走 `--clobber`，说明和标题重改。
+- Actions 页面手动触发（workflow_dispatch）**必须填版本号**：`gh release create` 会顺手建 tag，用 commit sha 当 tag 太容易被当成正式版。
+- 想加平台只改 Makefile 的 `PLATFORMS` 一行，workflow 不用动（`CGO_ENABLED=0`，交叉编译不需要真的那台机器）。
+- 发版作业会做自检：`sha256sum -c`、六个包齐不齐、把 linux/amd64 那份解开真跑一次 `version`。版本号没注入或者包不齐就直接红，不挂一份骗人的产物上去。Docker 镜像不在 CI 里构建，还是本地 `make docker`。
 
 ## 开发
 
