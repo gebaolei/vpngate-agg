@@ -20,6 +20,7 @@
 }
 
 body.theme-dark {
+  color-scheme: dark;
   --bg: #0b0f18;
   --bg-2: #111725;
   --bg-3: #17202f;
@@ -41,6 +42,7 @@ body.theme-dark {
 }
 
 body.theme-light {
+  color-scheme: light;
   --bg: #f3f6fb;
   --bg-2: #ffffff;
   --bg-3: #eef2f8;
@@ -62,6 +64,15 @@ body.theme-light {
 }
 
 * { box-sizing: border-box; }
+
+/* 主题类挂在 body 上，但浏览器自己画的那些东西（下拉展开的那张列表、
+   number 的上下箭头、checkbox、原生滚动条）看的是根元素的 color-scheme。
+   head 里的 meta[name=color-scheme] 只声明「这页支持深浅两套」，实际用哪套跟
+   系统偏好走而不跟这里的主题走 —— 后果就是深色模式下点开筛选下拉，弹层还是
+   白底黑字，看不清。这里用 :has 把根元素钉到当前主题上（CSS 的 color-scheme 比
+   meta 优先）——以前只有“系统也是深色”时才碰巧看不出问题，现在跟界面主题走。 */
+html:has(> body.theme-dark) { color-scheme: dark; }
+html:has(> body.theme-light) { color-scheme: light; }
 
 html, body {
   margin: 0;
@@ -217,8 +228,27 @@ code, kbd, .mono { font-family: var(--font-mono); }
   font-size: 12.5px;
 }
 .mini select[multiple] { min-width: 108px; height: 32px; padding: 4px; }
+/* max-width 也得钉：下拉的宽度由「最宽的那一项」决定，只有 min-width 的话
+   某个国家的名字很长时整排筛选会被它无限顶宽。accent-color 管多选弹层里的小对钩。 */
+.mini select {
+  max-width: 240px;
+  accent-color: var(--brand);
+}
 .mini input[type="number"] { width: 84px; }
 .mini select:focus, .mini input:focus { outline: none; border-color: var(--brand); }
+
+/* 展开后的那张列表是浏览器画的：上面的 color-scheme 先保证它不会白底（macOS /
+   Safari 只听这一个），能认 option 颜色的浏览器（Chrome/Edge）再把面板和
+   选中行接上主题。选中行不用实色 brand：筛选下拉是多选，连着选好几行时
+   实色块会让相邻行分不开。 */
+.mini select option, .mini select optgroup {
+  background: var(--panel-solid);
+  color: var(--text);
+}
+.mini select option:checked {
+  background: color-mix(in srgb, var(--brand) 26%, var(--panel-solid));
+  color: var(--text);
+}
 
 kbd {
   border: 1px solid var(--line-strong);
@@ -368,7 +398,7 @@ kbd {
 .panel.panel-pipeline .pipeline { min-height: 0; overflow-y: auto; }
 .panel.panel-pipeline .pipeline::-webkit-scrollbar { width: 9px; }
 .panel.panel-pipeline .pipeline::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 8px; }
-.nodes-view { display: grid; gap: var(--gap); }
+.nodes-view { display: grid; gap: var(--gap); align-content: start; }
 /* 右列比原来的整宽面板窄得多，sources / jobs 并排会挤，改成上下叠 */
 .panel-pipeline .pipeline { grid-template-columns: 1fr; }
 
@@ -554,9 +584,14 @@ kbd {
   background: var(--panel);
   display: grid;
   gap: 10px;
+  /* grid 的 align-content 默认是 normal（= stretch）：卡片比内容高时，多出来的
+     高度会被分给自动行。而 .main 的第二行是 minmax(0,1fr)、整页又有 min-height，
+     于是「结果很少 / 每页条数很小」时 .nodes-view 拿到一大块空白，过滤卡片就被
+     拉成行间距很大的胖卡片。行高按内容算，空白留在卡片外面。 */
+  align-content: start;
 }
 .filter-row { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; }
-.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .chips:empty { display: none; }
 
 .chip {
@@ -569,8 +604,18 @@ kbd {
   background: color-mix(in srgb, var(--bg-3) 70%, transparent);
   font-size: 11.5px;
   color: var(--text-dim);
+  /* 只能一行，行高和高度都钉死（用 em，跟着字号走，浏览器里调大字号也不会切字）。
+     不钉的话，同一排里只要有一个 chip 的行盒偏高（回退字体 / 国旗 emoji / 符号字体，
+     Windows 上尤其常见），或者首屏布局算错了没重新排，那个胶囊就会高一截；
+     .chips 的 align-items: center 另上关掉 flex 默认的 stretch，不会跟着同伴被拉长。 */
+  line-height: 1.35;
+  height: 2em;
+  white-space: nowrap;
+  max-width: 100%;
 }
-.chip button { border: none; background: none; color: var(--text-mute); cursor: pointer; padding: 0; font-size: 12px; line-height: 1; }
+/* flex 子项默认 min-width:auto，不关掉就不会收缩，省略号也就永远不会触发。 */
+.chip > .muted, .chip > b { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.chip button { flex: 0 0 auto; border: none; background: none; color: var(--text-mute); cursor: pointer; padding: 0; font-size: 12px; line-height: 1; }
 .chip button:hover { color: var(--bad); }
 .chip-solid { border-color: color-mix(in srgb, var(--brand) 45%, transparent); color: var(--brand); }
 

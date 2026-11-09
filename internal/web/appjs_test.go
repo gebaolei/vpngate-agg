@@ -336,3 +336,111 @@ func TestCSSOverviewFillsViewport(t *testing.T) {
 		t.Error("面板的三段式规则必须写成 .panel.panel-map / .panel.panel-pipeline，否则会被 .panel 覆盖")
 	}
 }
+
+// 深色模式下点开筛选下拉，展开的那张列表是浏览器画的：只给 select 本身染深色
+// 不够，必须把 color-scheme 声明到控件的祖先（根元素），否则弹层还是白底黑字。
+// 这条规则很容易在重构主题时被删掉，而且删了不会报错、只是「下拉看不清」，所以钉住。
+func TestCSSColorSchemeFollowsTheme(t *testing.T) {
+	blob, err := os.ReadFile("static/style.css")
+	if err != nil {
+		t.Fatalf("读 style.css 失败: %v", err)
+	}
+	src := string(blob)
+
+	// 两套主题各自声明自己的 scheme，缺一个就有一半的主题回到浏览器默认。
+	for _, want := range []string{
+		"html:has(> body.theme-dark) { color-scheme: dark; }",
+		"html:has(> body.theme-light) { color-scheme: light; }",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("style.css 少了 %q —— 浏览器画的控件（下拉弹层、number 箭头、checkbox）会跟着系统偏好走，不跟界面主题走", want)
+		}
+	}
+	for _, theme := range []string{"theme-dark", "theme-light"} {
+		block := regexp.MustCompile(`(?s)body\.` + theme + ` \{(.*?)\n\}`).FindStringSubmatch(src)
+		if block == nil {
+			t.Fatalf("找不到 body.%s 变量块", theme)
+		}
+		want := "color-scheme: " + strings.TrimPrefix(theme, "theme-") + ";"
+		if !strings.Contains(block[1], want) {
+			t.Errorf("body.%s 里没有 %s —— 控件不会继承当前主题的配色方案", theme, want)
+		}
+	}
+
+	// 能认 option 颜色的浏览器（Chrome/Edge）靠这两条把弹层面板接上主题。
+	for _, want := range []string{
+		".mini select option, .mini select optgroup {",
+		".mini select option:checked {",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("style.css 少了 %q —— 展开的下拉列表面板不会跟着主题上色", want)
+		}
+	}
+
+	// head 里那条 meta 是 CSS 加载前的兜底（首帧不闪白），别顺手删了。
+	h, err := os.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatalf("读 index.html 失败: %v", err)
+	}
+	if !strings.Contains(string(h), `<meta name="color-scheme"`) {
+		t.Error("index.html 的 <meta name=\"color-scheme\"> 被删了 —— CSS 到位前首帧会按浏览器默认刷一下白")
+	}
+}
+
+// 已选条件的 chip 是一排胶囊：只要有一个 chip 的内容特别长（国家全名之类），或者
+// 文字命中了行高很大的回退字体（国旗 emoji、符号字体在 Windows 上尤其明显），
+// 那个胶囊就会自己撑成两行高的椭圆，跟同一排里其他 chip 差一截。这里钉死「只有一行
+// + 行高固定 + 超出省略」，顺手给下拉框也钉个上限（它的宽度由最宽的那一项决定）。
+func TestCSSChipStaysOneLine(t *testing.T) {
+	blob, err := os.ReadFile("static/style.css")
+	if err != nil {
+		t.Fatalf("读 style.css 失败: %v", err)
+	}
+	src := string(blob)
+
+	block := regexp.MustCompile(`(?s)\.chip \{(.*?)\n\}`).FindStringSubmatch(src)
+	if block == nil {
+		t.Fatal("找不到 .chip 规则块")
+	}
+	for _, want := range []string{"white-space: nowrap;", "line-height: 1.35;", "height: 2em;", "max-width: 100%;"} {
+		if !strings.Contains(block[1], want) {
+			t.Errorf(".chip 里没有 %s —— 长内容或回退字体会把某个 chip 撑成两行高的椭圆", want)
+		}
+	}
+	// flex 容器默认 align-items:normal(=stretch)，不关掉的话同排里偏高的那个 chip
+	// 会把其他人一起拉长。
+	line := regexp.MustCompile(`(?m)^\.chips \{.*\}$`).FindString(src)
+	if line == "" || !strings.Contains(line, "align-items: center;") {
+		t.Error(".chips 没有 align-items: center —— flex 默认 stretch 会把整排 chip 拉到同高")
+	}
+	// flex 子项不关掉 min-width:auto 就不会收缩，省略号永远不出现。
+	if !strings.Contains(src, ".chip > .muted, .chip > b { min-width: 0; overflow: hidden; text-overflow: ellipsis; }") {
+		t.Error("chip 的文字没有 min-width:0 + 省略号 —— 收缩不了，只会被动变宽")
+	}
+	sel := regexp.MustCompile(`(?s)\.mini select \{(.*?)\n\}`).FindStringSubmatch(src)
+	if sel == nil || !strings.Contains(sel[1], "max-width: 240px;") {
+		t.Error(".mini select 没有 max-width —— 某个国家名很长时整排筛选会被它顶宽")
+	}
+}
+
+// 过滤卡片是 grid（gap 10px），grid 的 align-content 默认 normal(=stretch)：卡片比
+// 内容高时，多出来的高度会被分给自动行。而 .main 第二行是 minmax(0,1fr) 且整页有
+// min-height，所以「结果很少」或「每页条数很小」时 .nodes-view 会拿到一大块空白，
+// 过滤卡片被拉成行间距很大的胖卡片（实测 .filter-row 76px→144px、.chips 23px→92px）。
+// 两处都要 align-content: start：外层不给空白，内层也不接空白。
+func TestCSSFilterCardNotStretched(t *testing.T) {
+	blob, err := os.ReadFile("static/style.css")
+	if err != nil {
+		t.Fatalf("读 style.css 失败: %v", err)
+	}
+	src := string(blob)
+	for _, sel := range []string{`\.nodes-view`, `\.filters`} {
+		block := regexp.MustCompile(`(?s)` + sel + ` \{(.*?)\n\}`).FindStringSubmatch(src)
+		if block == nil {
+			t.Fatalf("找不到 %s 规则块", sel)
+		}
+		if !strings.Contains(block[1], "align-content: start;") {
+			t.Errorf("%s 没有 align-content: start —— grid 默认 stretch 会把剩余高度分给自动行，过滤卡片会胀高", sel)
+		}
+	}
+}
