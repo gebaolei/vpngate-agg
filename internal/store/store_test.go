@@ -878,7 +878,7 @@ func TestStatsAndCountries(t *testing.T) {
 		t.Errorf("没判定过家宽时家宽数该是 0，实得 %d", byCode["JP"].Residential)
 	}
 
-	// 国家分布图按「家宽占比」着色，所以每桶要带出家宽节点数。
+	// 国家分布图按「家宽数」着色，所以每桶要带出家宽节点数。
 	for _, id := range []string{"v1:a", "v1:b"} {
 		if !s.SetResidential(id, true) {
 			t.Fatalf("节点 %s 不在池子里，用例前提不对", id)

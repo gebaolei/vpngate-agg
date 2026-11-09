@@ -623,30 +623,32 @@ const MAP_W = 720;
 const MAP_H = 360;
 
 // 每个指标决定「按什么上色」和「tooltip 怎么写」。气泡大小恒为节点数 ——
-// 大小换成比例的话，一个国家 2 个节点和 700 个节点在图上就不成比例了。
+// 大小换成数值的话，一个国家 2 个节点和 700 个节点在图上就不成比例了。
+// norm() 的第二个参数是各指标的取值上限（ctx，renderMap 里按有坐标的国家算），
+// 计数型指标用它做归一化；都开平方，否则 US 一个点就把其他国家染成同一种红。
 const MAP_METRICS = {
   nodes: {
     label: '节点数',
     value: (c) => c.nodes || 0,
-    norm: (c, max) => Math.sqrt((c.nodes || 0) / max),
+    norm: (c, ctx) => Math.sqrt((c.nodes || 0) / ctx.nodes),
     detail: (c) => `${num(c.nodes || 0)} 个节点`,
     short: (c) => num(c.nodes || 0),
   },
   alive: {
-    label: '可达率',
-    value: (c) => (c.nodes ? (c.alive || 0) / c.nodes : 0),
-    norm: (c) => (c.nodes ? (c.alive || 0) / c.nodes : 0),
-    detail: (c) => `可达 ${num(c.alive || 0)}/${num(c.nodes || 0)}` +
+    label: '可达数',
+    value: (c) => c.alive || 0,
+    norm: (c, ctx) => Math.sqrt((c.alive || 0) / ctx.alive),
+    detail: (c) => `可达 ${num(c.alive || 0)} 个/${num(c.nodes || 0)} 个节点` +
       (c.nodes ? `（${Math.round((100 * (c.alive || 0)) / c.nodes)}%）` : ''),
-    short: (c) => (c.nodes ? Math.round((100 * (c.alive || 0)) / c.nodes) + '%' : '–'),
+    short: (c) => num(c.alive || 0),
   },
   res: {
-    label: '家宽占比',
-    value: (c) => (c.nodes ? (c.residential || 0) / c.nodes : 0),
-    norm: (c) => (c.nodes ? (c.residential || 0) / c.nodes : 0),
-    detail: (c) => `志愿者家宽 ${num(c.residential || 0)}/${num(c.nodes || 0)}` +
+    label: '家宽数',
+    value: (c) => c.residential || 0,
+    norm: (c, ctx) => Math.sqrt((c.residential || 0) / ctx.res),
+    detail: (c) => `志愿者家宽 ${num(c.residential || 0)} 个/${num(c.nodes || 0)} 个节点` +
       (c.nodes ? `（${Math.round((100 * (c.residential || 0)) / c.nodes)}%）` : ''),
-    short: (c) => (c.nodes ? Math.round((100 * (c.residential || 0)) / c.nodes) + '%' : '–'),
+    short: (c) => num(c.residential || 0),
   },
   ping: {
     label: '中位延迟',
@@ -722,13 +724,17 @@ function renderMap() {
   const noCoord = all.filter((c) => c.code && c.code !== '?' && !COUNTRY_LL[c.code]);
   const unknown = all.find((c) => c.code === '?');
   const maxNodes = Math.max(1, ...drawn.map((c) => c.nodes || 0));
+  // 计数型指标（可达数 / 家宽数）各自按有坐标国家的最大值归一化：可达数永远≤
+  // 节点数，共用节点数的最大值会把颜色全挤到冷端，看不出差异。
+  const maxOf = (key) => Math.max(1, ...drawn.map((c) => c[key] || 0));
+  const ctx = { nodes: maxNodes, alive: maxOf('alive'), res: maxOf('residential') };
 
   // 大的后画，小的先画，否则大国气泡把小国盖住看不见。
   drawn.sort((a, b) => (a.nodes || 0) - (b.nodes || 0));
   drawn.forEach((c) => {
     const ll = COUNTRY_LL[c.code];
     const r = 3.2 + 21 * Math.sqrt((c.nodes || 0) / maxNodes);
-    const t = m.norm(c, maxNodes);
+    const t = m.norm(c, ctx);
     const g = sv('g', { class: 'map-dot' + (t < 0 ? ' na' : ''), 'data-code': c.code });
     g.appendChild(sv('title', {
       text: `${c.name || c.code} (${c.code}) · ${num(c.nodes || 0)} 节点 · ` +
@@ -742,15 +748,13 @@ function renderMap() {
   });
 
   // 只给当前指标前六名贴标签：全贴就糊成一片了。
-  // 比例型指标（可达率 / 家宽占比）要先按节点数设门槛，否则 1 个节点的国家
-  // 会以 100% 抢走标签 —— 那既不代表规模，也没人关心。
+  // 四个指标现在都是计数（节点数 / 可达数 / 家宽数）或极值（延迟），按取值
+  // 排就天然先给大国贴标签，不再需要以前那种「节点数 ≥5」的门槛。
   const hasCode = (c) => c.code && c.code !== '?' && COUNTRY_LL[c.code];
-  const ratio = mapMetric === 'alive' || mapMetric === 'res';
   // norm() 返回负数 = 这个指标对这个国家没数据（比如从没测过延迟），
   // 不能参与排名：否则按延迟升序贴出来的前六名全是「没测过延迟」。
-  const hasData = (c) => m.norm(c, maxNodes) >= 0;
-  let ranked = all.filter((c) => hasCode(c) && hasData(c) && (!ratio || (c.nodes || 0) >= 5));
-  if (ranked.length < 3) ranked = all.filter((c) => hasCode(c) && hasData(c));
+  const hasData = (c) => m.norm(c, ctx) >= 0;
+  let ranked = all.filter((c) => hasCode(c) && hasData(c));
   const asc = m.rank === 'asc';
   const top = ranked.slice().sort((a, b) => (asc ? m.value(a) - m.value(b) : m.value(b) - m.value(a))).slice(0, 6);
   // 标签要防重叠：欧洲那一串国家挨得很近，全用「正上方」这一种摆法就会
@@ -788,7 +792,7 @@ function renderMap() {
   });
   box.appendChild(svg);
 
-  renderMapRank(ranked.slice().sort((a, b) => m.value(b) - m.value(a)), m, mapMetric === 'ping' ? 'asc' : 'desc');
+  renderMapRank(ranked.slice().sort((a, b) => m.value(b) - m.value(a)), m, mapMetric === 'ping' ? 'asc' : 'desc', ctx);
 
   const legend = $('#map-legend');
   if (legend) {
@@ -798,9 +802,15 @@ function renderMap() {
     [0, 0.25, 0.5, 0.75, 1].forEach((t) => sw.appendChild(el('span', { class: 'lg-swatch', style: `background:${mapColor(t)}` })));
     legend.appendChild(sw);
     const biggest = drawn.slice(-1)[0];
+    // 计数型指标（可达数 / 家宽数）的颜色没有 0-100% 那种天然刻度，标出
+    // 「这个指标最多的是谁」当地标，否则深浅读不出量级。
+    const scaleTop = drawn.reduce((a, c) => (!a || m.value(c) > m.value(a) ? c : a), null);
+    const scaleNote = (mapMetric === 'alive' || mapMetric === 'res') && scaleTop
+      ? ` · 颜色按${m.label}，最多 ${scaleTop.name || scaleTop.code} ${num(m.value(scaleTop))} 个`
+      : '';
     legend.appendChild(el('span', {
       text: `气泡大小 = 节点数` + (biggest ? ` · 最多 ${biggest.name || biggest.code} ${num(biggest.nodes)} 个` : '') +
-        ` · 共 ${num(drawn.length)} 个国家`,
+        scaleNote + ` · 共 ${num(drawn.length)} 个国家`,
     }));
     if (unknown && unknown.nodes) legend.appendChild(el('span', { text: `没有国家码的节点 ${num(unknown.nodes)} 个（不画在图上）` }));
     if (noCoord.length) {
@@ -815,7 +825,7 @@ function renderMap() {
 // renderMapRank 把当前指标的国家排行画成可点的小条：地图是 2:1 的，面板比它高
 // 时地图只能居中，中间那段空白正好放它；顺带给键盘一条「按国家筛」的路
 //（SVG 气泡本身不做 focus，靠这几行补上）。
-function renderMapRank(list, m, order) {
+function renderMapRank(list, m, order, ctx) {
   const box = $('#map-rank');
   if (!box) return;
   box.textContent = '';
@@ -823,7 +833,7 @@ function renderMapRank(list, m, order) {
   const take = sorted.slice(0, 8);
   if (!take.length) return;
   // 条长按「这一指标下的取值」给，延迟取负向（越快条越长），否则条长会跟颜色打架。
-  const vals = take.map((c) => Math.max(0, m.norm(c, Math.max(1, ...list.map((x) => x.nodes || 0)))));
+  const vals = take.map((c) => Math.max(0, m.norm(c, ctx)));
   const vmax = Math.max(...vals, 1e-9);
   take.forEach((c, i) => {
     const pct = Math.max(3, Math.round((100 * vals[i]) / vmax));

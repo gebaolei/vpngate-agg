@@ -477,6 +477,6 @@ type CountryBucket struct {
 	MedPing   int64  `json:"med_ping_ms"`
 	MedPurity int    `json:"med_purity"`
 	// Residential 是这一国家里判定为志愿者家宽的节点数。国家分布图按
-	// 「家宽占比」着色时读它；缺这个字段前端就只能按节点数上色。
+	// 「家宽数」着色时读它；缺这个字段前端就只能按节点数上色。
 	Residential int `json:"residential"`
 }
