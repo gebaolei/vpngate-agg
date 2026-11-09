@@ -11,7 +11,16 @@
 GO       ?= go
 BIN      := bin/vpngate-agg
 PKG      := ./...
-VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# 版本号只算一次。原先写的是 `VERSION ?= $(shell ...)`：?= 是递归赋值，
+# 每引用一次 $(VERSION) 就把 git describe 重跑一遍 —— 于是 dist/ 里的文件名
+# 用的版本和 -ldflags 注进二进制的版本可能不是同一个。
+# 命令行（make VERSION=v1.2.3）或者环境里给了就用那个，不能给空的。
+ifeq ($(origin VERSION),undefined)
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+endif
+ifeq ($(strip $(VERSION)),)
+$(error VERSION 是空的：git describe 跑不出来就 make VERSION=vX.Y.Z)
+endif
 LDFLAGS  := -s -w -X main.version=$(VERSION)
 
 # 目标平台，make release 会挨个编一遍。
@@ -73,9 +82,9 @@ release: ## 交叉编译多平台到 dist/
 	@for p in $(PLATFORMS); do \
 		os=$${p%/*}; arch=$${p#*/}; \
 		ext=""; [ "$$os" = "windows" ] && ext=".exe"; \
-		name="dist/vpngate-agg-$$VERSION-$$os-$$arch$$ext"; \
+		name="dist/vpngate-agg-$(VERSION)-$$os-$$arch$$ext"; \
 		echo "→ $$name"; \
-		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o $$name . || exit 1; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o "$$name" . || exit 1; \
 	done
 	@cd dist && sha256sum vpngate-agg-* > SHA256SUMS 2>/dev/null || shasum -a 256 vpngate-agg-* > SHA256SUMS
 	@cat dist/SHA256SUMS
