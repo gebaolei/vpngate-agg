@@ -1,6 +1,6 @@
 # vpngate-agg 对外 API
 
-> 适用版本：`vpngate-agg 0.1.0`（响应里的 `version` 字段就是这个值）。
+> 适用版本：`vpngate-agg 0.3.0`（响应里的 `version` 字段就是这个值）。
 > 本文只覆盖**对外提供服务的接口**：`/vpngate/*` 与 `/healthz`。
 > 内嵌前端专用的 `/api/*`（会话 Cookie + CSRF）不在本文范围，索引见 [README 的「HTTP 接口」](../README.md#http-接口)。第三方不要接 `/api/*`：那套凭据是浏览器登录态，口令一改就断，也无法按调用方审计。
 
@@ -205,7 +205,7 @@ curl "...?key=$TOK"                        # 只能填 URL 的客户端
 免鉴权，给监控探针用。
 
 ```json
-{ "ok": true, "nodes": 269, "version": "0.1.0", "dirty": false }
+{ "ok": true, "nodes": 269, "version": "0.3.0", "dirty": false }
 ```
 
 | 字段 | 含义 |

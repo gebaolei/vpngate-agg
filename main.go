@@ -32,8 +32,9 @@ import (
 	"github.com/gebaolei/vpngate-agg/internal/web"
 )
 
-// version 由 Makefile 用 -ldflags -X main.version=... 注入。
-var version = "0.1.0"
+// version 由 Makefile 用 -ldflags -X main.version=... 注入（值来自 git describe）。
+// 这里的是不带 git 信息时（go build 直提）的默认值，跟最新 tag 保持同一步。
+var version = "0.3.0"
 
 const usageText = `vpngate-agg —— VPN Gate 节点聚合 / 连通测试 / IP 纯净度
 
