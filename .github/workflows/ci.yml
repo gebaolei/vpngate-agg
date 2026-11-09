@@ -26,14 +26,16 @@ jobs:
     name: 检查（gofmt / vet / 测试）
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Go 版本跟着 go.mod 走（go.mod 写 1.26 就用 1.26），
       # 免得这里硬编一个版本，将来 go.mod 升级时 CI 悄悄落后。
-      - uses: actions/setup-go@v5
+      # cache: false —— 目前零第三方依赖、没有 go.sum，开缓存只会报
+      # “Dependencies file is not found” 的 warning。加了依赖再把这里打开。
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
 
       # 顺序有讲究：格式和 vet 是秒级失败，先跑；测试最慢放最后。
       - name: gofmt
@@ -57,7 +59,7 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Makefile 里 VERSION := git describe --tags --always --dirty。
           # 默认浅克隆看不到 tag（甚至看不到历史），版本会退化成 commit sha，
@@ -65,10 +67,10 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
 
       - name: 编译
         run: make build-linux
@@ -77,9 +79,21 @@ jobs:
       - name: 自检
         run: ./bin/vpngate-agg-linux-amd64 version
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: vpngate-agg-snapshot-linux-amd64
           path: bin/vpngate-agg-linux-amd64
+          if-no-files-found: error
+          retention-days: 30
+
+      # 打包也在 push 时跑一遍：发版才会踩的坑（上次 windows 的 zip 写错路径、
+      # 产物静默少一个）不该等到打 tag 才发现。
+      - name: 打包冒烟（make package）
+        run: make package
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vpngate-agg-snapshot-linux-amd64-tar
+          path: dist/archives/*-linux-amd64.tar.gz
           if-no-files-found: error
           retention-days: 30

@@ -84,22 +84,30 @@ release: ## 交叉编译多平台到 dist/
 package: release ## 交叉编译 + 打包成 dist/archives/*.tar.gz（windows 优先 zip），发 Release 用的就是这一条
 	@mkdir -p dist/archives
 	@rm -f dist/archives/*
-	@for p in $(PLATFORMS); do \
+	@abs="$$(pwd)"; \
+	for p in $(PLATFORMS); do \
 		os=$${p%/*}; arch=$${p#*/}; ext=""; [ "$$os" = windows ] && ext=".exe"; \
 		bin="dist/vpngate-agg-$(VERSION)-$$os-$$arch$$ext"; \
 		[ -f "$$bin" ] || { echo "缺编译产物 $$bin"; exit 1; }; \
 		stage="$$(mktemp -d)"; cp "$$bin" "$$stage/vpngate-agg$$ext"; cp README.md "$$stage/"; \
 		name="dist/archives/vpngate-agg-$(VERSION)-$$os-$$arch"; \
 		if [ "$$os" = windows ] && command -v zip >/dev/null 2>&1; then \
-			(cd "$$stage" && zip -qr "$(OLDPWD)/$$name.zip" .); \
+			# 这里不能用 $$OLDPWD：make 用的是 /bin/sh（Debian/Ubuntu 上是 dash），\
+			# dash 不更新 OLDPWD，拿到的可能是外层 shell 留下的旧值 —— \
+			# 结果 zip 写到一个不存在的目录，产物静默少一个。$$abs 是在 cd 之前记下的。\
+			(cd "$$stage" && zip -qr "$$abs/$$name.zip" .) || { echo "打包 $$os/$$arch 失败"; exit 1; }; \
 		else \
-			tar -czf "$$name.tar.gz" -C "$$stage" .; \
+			tar -czf "$$name.tar.gz" -C "$$stage" . || { echo "打包 $$os/$$arch 失败"; exit 1; }; \
 		fi; \
 		rm -rf "$$stage"; \
 		echo "→ $$name"; \
 	done
+	@got=$$(ls dist/archives/ | grep -c '^vpngate-agg-'); \
+	if [ "$$got" != "$$(echo $(PLATFORMS) | wc -w)" ]; then \
+		echo "只打出 $$got 个包，应该有 $$(echo $(PLATFORMS) | wc -w) 个 —— 别把一份缺产物的 Release 发出去"; exit 1; \
+	fi
 	@cd dist/archives && sha256sum vpngate-agg-* > SHA256SUMS 2>/dev/null || shasum -a 256 vpngate-agg-* > SHA256SUMS
-	@echo "打包完成，校验值在 dist/archives/SHA256SUMS"
+	@echo "打包完成（$$(ls dist/archives/ | grep -c '^vpngate-agg-') 个包），校验值在 dist/archives/SHA256SUMS"
 
 clean:
 	rm -rf bin dist coverage.out

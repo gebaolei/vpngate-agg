@@ -32,7 +32,7 @@ jobs:
     name: 交叉编译并发布
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # 关键：Makefile 里 VERSION := git describe --tags --always --dirty。
           # 浅克隆看不到那个 tag，版本会退化成 commit sha，
@@ -40,10 +40,10 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false   # 零第三方依赖 → 没有 go.sum，开缓存只会报 warning
 
       # 发版前先过一遍本地同款检查：格式和测试都红着就别浪费一次发版。
       - name: 检查
