@@ -35,8 +35,6 @@ const DefaultAPIURL = config.DefaultAPI
 const (
 	kindVpngate = 0
 	kindMirror  = 1
-	kindCDN     = 2
-	kindCDNPool = 3
 )
 
 // Aggregated 是一轮刷新的产出。
@@ -51,16 +49,11 @@ type Aggregated struct {
 	Mirrors       []model.MirrorEntry
 	MirrorFetched time.Time
 	MirrorErr     string
-	Commit        string // 镜像单快照 commit
-	PoolCommit    string // 镜像累积池 commit
-	SnapshotAt    time.Time
-	PoolAt        time.Time
-	CDNChecked    map[string]string // 校验过的文件 → sha256 或失败原因
-	Warnings      []string          // 不影响可用性的告警（池子不可用、缺标记等）
-	NewCount      int               // 本轮新增的身份数（相对调用方给的旧池）
+	Warnings      []string // 不影响可用性的告警（某站残缺、同源重复等）
+	NewCount      int      // 本轮新增的身份数（相对调用方给的旧池）
 }
 
-// Aggregate 并发拉全部启用的源，按身份 ID 合并。
+// Aggregate 并发拉全部启用的源（官方主站 + 官方镜像站），按身份 ID 合并。
 //
 // 只要有一个源成功就返回结果；全部失败才报错，调用方据此保留上一轮的池子。
 // prevByURL 是上一轮每个源各自返回的节点数（首轮传空 map）——不能用合并后的
@@ -72,7 +65,6 @@ func Aggregate(ctx context.Context, cfg config.SourcesConfig, client *Client, mi
 		Nodes:       map[string]*model.Node{},
 		Configs:     map[string][]byte{},
 		CountsByURL: map[string]int{},
-		CDNChecked:  map[string]string{},
 	}
 
 	type slot struct {
@@ -118,61 +110,15 @@ func Aggregate(ctx context.Context, cfg config.SourcesConfig, client *Client, mi
 		}(i, s)
 	}
 
-	// CDN 是另一套协议（索引 + SHA256 + JSON），单独一个 goroutine 并行跑。
-	var cdnRes *CDNResult
-	var cdnStat, cdnPoolStat model.SourceStat
-	if cfg.CDN.Enabled {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			t0 := time.Now()
-			cdnStat = model.SourceStat{Name: "cdn", URL: cfg.CDN.IndexURL, At: now, Via: "jsdelivr"}
-			cdnPoolStat = model.SourceStat{Name: "cdn-pool", URL: poolIndexURL(cfg.CDN), At: now, Via: "jsdelivr"}
-			r, err := NewCDN(client, cfg.CDN).Fetch(ctx)
-			cdnStat.MS = time.Since(t0).Milliseconds()
-			if err != nil {
-				cdnStat.Err = err.Error()
-				return
-			}
-			cdnRes = r
-			cdnStat.Nodes = len(r.Rows)
-			cdnStat.Commit = r.Commit
-			cdnPoolStat.Nodes = len(r.PoolRows)
-			cdnPoolStat.Commit = r.PoolCommit
-			agg.CountsByURL["cdn-pool"] = len(r.PoolRows)
-		}()
-	}
 	wg.Wait()
 
 	for _, st := range stats {
 		agg.Stats = append(agg.Stats, st)
 	}
-	if cfg.CDN.Enabled {
-		agg.Stats = append(agg.Stats, cdnStat)
-		if cdnRes != nil {
-			agg.Stats = append(agg.Stats, cdnPoolStat)
-			agg.Commit = cdnRes.Commit
-			agg.PoolCommit = cdnRes.PoolCommit
-			agg.SnapshotAt = cdnRes.SnapshotAt
-			agg.PoolAt = cdnRes.PoolAt
-			for k, v := range cdnRes.Checked {
-				agg.CDNChecked[k] = v
-			}
-			if bad, ok := cdnRes.Checked["pool/servers.json"]; ok && strings.Contains(bad, "failed") {
-				agg.Warnings = append(agg.Warnings, "累积池不可用: "+bad)
-			}
-		}
-	}
 
-	// 合并顺序 = 优先级：主站 > 官方镜像 > CDN 单快照 > CDN 累积池。
-	// 主站是实时生成的，镜像是缓存快照：实测同一节点在镜像里的 Score/Ping/Speed
-	// 可能是旧值，所以两边都有时用主站的。
-	order := make([][]RawRow, 0, len(per)+2)
-	order = append(order, per...)
-	if cdnRes != nil {
-		order = append(order, cdnRes.Rows, cdnRes.PoolRows)
-	}
-	for _, list := range order {
+	// 合并顺序 = 优先级：主站 > 官方镜像。主站是实时生成的，镜像是缓存快照：
+	// 实测同一节点在镜像里的 Score/Ping/Speed 可能是旧值，所以两边都有时用主站的。
+	for _, list := range per {
 		for _, row := range list {
 			agg.merge(row, now)
 		}
@@ -194,9 +140,9 @@ func Aggregate(ctx context.Context, cfg config.SourcesConfig, client *Client, mi
 
 // merge 把一个源给的节点并入聚合结果。
 //
-// 先到先得，但不是「整条覆盖」：累积池的节点只带元数据（配置正文靠按需拉，
-// 只有 mirror 校验过的 TCP 端点），而同一 ID 的单快照节点带全量。所以这里
-// 是「补字段」而不是「换对象」，同时保住已经拿到的配置正文与第三方观测。
+// 先到先得，但不是「整条覆盖」：主站给的正文可能缺失（官方接口偶尔不返配置），
+// 而镜像给的是另一份缓存。所以这里是「补字段」而不是「换对象」，同时保住
+// 已经拿到的配置正文。
 func (a *Aggregated) merge(row RawRow, now time.Time) {
 	n := row.Node
 	if n == nil || n.ID == "" {
@@ -216,18 +162,15 @@ func (a *Aggregated) merge(row RawRow, now time.Time) {
 		return
 	}
 
-	// 池子来源（没有配置正文）：只补元数据，不碰连接参数。
+	// 没带配置正文的来源：只补元数据，不碰连接参数。
 	if row.Config == nil {
-		if n.CFProbe != nil && existing.CFProbe == nil {
-			existing.CFProbe = n.CFProbe
-		}
 		if n.InLatestSource != nil {
 			existing.InLatestSource = n.InLatestSource
 		}
 		if !n.FirstSeen.IsZero() && n.FirstSeen.Before(existing.FirstSeen) {
 			existing.FirstSeen = n.FirstSeen
 		}
-		// 之前只从池子见过、连端点都没有，而现在这个池子节点有端点：补上。
+		// 之前只见过元数据、连端点都没有，而现在这一路有端点：补上。
 		if existing.Server == "" && n.Server != "" {
 			existing.Server, existing.Port, existing.Proto = n.Server, n.Port, n.Proto
 		}
@@ -240,9 +183,6 @@ func (a *Aggregated) merge(row RawRow, now time.Time) {
 		if _, have := a.Configs[n.ConfigSHA256]; !have {
 			a.Configs[n.ConfigSHA256] = row.Config
 		}
-	}
-	if n.CFProbe != nil && existing.CFProbe == nil {
-		existing.CFProbe = n.CFProbe
 	}
 	if n.InLatestSource != nil {
 		existing.InLatestSource = n.InLatestSource

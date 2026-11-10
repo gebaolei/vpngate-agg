@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gebaolei/vpngate-agg/internal/config"
 	"github.com/gebaolei/vpngate-agg/internal/model"
 	"github.com/gebaolei/vpngate-agg/internal/source"
 )
@@ -1006,7 +1007,6 @@ func TestSaveWritesValidJSONAndAtomicReplace(t *testing.T) {
 		Nodes:       map[string]*model.Node{},
 		Stats:       []model.SourceStat{{Name: "official", URL: "https://www.vpngate.net/api/iphone/", Nodes: 1, MS: 120}},
 		CountsByURL: map[string]int{"https://www.vpngate.net/api/iphone/": 1},
-		Commit:      strings.Repeat("0", 40),
 	}, Eviction{KeepDays: 7})
 	if err := s.Save(); err != nil {
 		t.Fatal(err)
@@ -1028,16 +1028,9 @@ func TestSaveWritesValidJSONAndAtomicReplace(t *testing.T) {
 	if meta, _ := doc["meta"].(map[string]any); meta["source_stats"] == nil {
 		t.Error("各来源的抓取状态要落进快照，重启后界面才知道上一轮怎么样")
 	}
-	if doc["cdn_commit"] != strings.Repeat("0", 40) {
-		t.Errorf("commit 没落盘: %v", doc["cdn_commit"])
-	}
-
 	// 上一轮的各源计数要留着做「数量骤减」判断。
 	if got := s.PrevCounts()["https://www.vpngate.net/api/iphone/"]; got != 1 {
 		t.Errorf("PrevCounts = %v，上一轮的各源计数要留着做「数量骤减」判断", got)
-	}
-	if commit, _ := s.Commits(); commit != strings.Repeat("0", 40) {
-		t.Errorf("Commits = %q", commit)
 	}
 	if m := s.Meta(); len(m.SourceStats) != 1 || m.SourceStats[0].Name != "official" {
 		t.Errorf("Meta 里的源状态 = %+v", m.SourceStats)
@@ -1273,5 +1266,204 @@ func TestLoadBackfillsConfigLocalFromDisk(t *testing.T) {
 	}
 	if !again.Dirty() {
 		t.Error("回填过就该标脏，让修正写回快照（下次启动就不用再补）")
+	}
+}
+
+// 容量裁剪：超出 max_nodes 时先走硬伤的，然后才轮到「活着但分低」的。
+func TestTrimToCapacityHardFlawsGoFirst(t *testing.T) {
+	s := newStoreWith(t,
+		node("v1:good", "good", "8.8.8.1", "JP", "tcp", 1194),
+		node("v1:dead", "dead", "8.8.8.2", "JP", "tcp", 1194),
+		node("v1:host", "host", "8.8.8.3", "JP", "tcp", 1194),
+		node("v1:ghost", "ghost", "8.8.8.4", "US", "tcp", 1194),
+		node("v1:poor", "poor", "8.8.8.5", "US", "tcp", 1194),
+	)
+	// good：连着两次成功，本轮也在名单里 —— 最不该被它动的。
+	feedProbe(t, s, "v1:good", true, 40, model.ServiceSoftEther, 2*time.Hour)
+	feedProbe(t, s, "v1:good", true, 42, model.ServiceSoftEther, time.Hour)
+	// dead：连续两轮明确否定（RST），已判定不可达。
+	feedProbe(t, s, "v1:dead", false, 0, model.ServiceRefused, 2*time.Hour)
+	feedProbe(t, s, "v1:dead", false, 0, model.ServiceRefused, time.Hour)
+	// poor：连上了但延迟很高、只测过一次：分比 good 低，可它没有硬伤。
+	feedProbe(t, s, "v1:poor", true, 900, model.ServiceSoftEther, 30*time.Minute)
+	// host：纯净度结论是机房出口。
+	s.ApplyPurity(&model.PurityResult{IP: "8.8.8.3", CheckedAt: time.Now().UTC(),
+		Score: 20, Level: model.PurityPoor, IPType: model.TypeHosting})
+
+	// 下一轮：名单里没有 ghost 了，而它也从没被探测过，是个空壳。
+	apply(t, s,
+		node("v1:good", "good", "8.8.8.1", "JP", "tcp", 1194),
+		node("v1:dead", "dead", "8.8.8.2", "JP", "tcp", 1194),
+		node("v1:host", "host", "8.8.8.3", "JP", "tcp", 1194),
+		node("v1:poor", "poor", "8.8.8.5", "US", "tcp", 1194),
+	)
+
+	// 上限 2：得走三个，而且必须是 dead → host → ghost。
+	d := s.Trim(Eviction{MaxNodes: 2})
+	if d.Trimmed != 3 || d.Total != 2 {
+		t.Fatalf("裁剪结果 = %+v，期望裁掉 3 剩 2", d)
+	}
+	for _, id := range []string{"v1:dead", "v1:host", "v1:ghost"} {
+		if _, ok := s.Get(id); ok {
+			t.Errorf("%s 有硬伤，该被裁掉", id)
+		}
+	}
+	for _, id := range []string{"v1:good", "v1:poor"} {
+		if _, ok := s.Get(id); !ok {
+			t.Errorf("%s 没有硬伤，不该被容量裁掉", id)
+		}
+	}
+	// IP 索引要跟着清干净，否则纯净度回写会去找已经不存在的节点。
+	if got := s.NodesWithIP("8.8.8.2"); len(got) != 0 {
+		t.Errorf("裁掉节点的 IP 索引没清: %v", got)
+	}
+}
+
+// max_nodes 设 0（或负数）是「不限」；没超上限时也不该动一根毛。
+func TestTrimNoopWhenUnderLimit(t *testing.T) {
+	s := newStoreWith(t,
+		node("v1:a", "a", "8.8.8.1", "JP", "tcp", 1194),
+		node("v1:b", "b", "8.8.8.2", "JP", "tcp", 1194),
+	)
+	feedProbe(t, s, "v1:b", false, 0, model.ServiceRefused, time.Hour)
+	for _, max := range []int{0, -1, 2, 500} {
+		if d := s.Trim(Eviction{MaxNodes: max}); d.Trimmed != 0 || d.Total != 2 {
+			t.Errorf("max_nodes=%d 不该裁任何东西，实得 %+v", max, d)
+		}
+	}
+	if s.Count() != 2 {
+		t.Errorf("池子 = %d，期望还是 2", s.Count())
+	}
+}
+
+// 同一档里先删「本轮名单里没有」的：删了不会下一轮又被抓回来，池子是真变小。
+func TestTrimSameBucketPrefersAbsent(t *testing.T) {
+	s := newStoreWith(t,
+		node("v1:gone", "gone", "8.8.8.1", "JP", "tcp", 1194),
+		node("v1:heredead", "heredead", "8.8.8.2", "JP", "tcp", 1194),
+		node("v1:ok", "ok", "8.8.8.3", "JP", "tcp", 1194),
+	)
+	for _, id := range []string{"v1:gone", "v1:heredead"} {
+		feedProbe(t, s, id, false, 0, model.ServiceRefused, 2*time.Hour)
+		feedProbe(t, s, id, false, 0, model.ServiceRefused, time.Hour)
+	}
+	feedProbe(t, s, "v1:ok", true, 40, model.ServiceSoftEther, time.Hour)
+	// 下一轮：gone 不在名单里了；heredead 还在 —— 上游不知道它已经连不上。
+	apply(t, s,
+		node("v1:heredead", "heredead", "8.8.8.2", "JP", "tcp", 1194),
+		node("v1:ok", "ok", "8.8.8.3", "JP", "tcp", 1194),
+	)
+	if d := s.Trim(Eviction{MaxNodes: 2}); d.Trimmed != 1 {
+		t.Fatalf("裁掉 %d 个，期望 1 个: %+v", d.Trimmed, d)
+	}
+	if _, ok := s.Get("v1:gone"); ok {
+		t.Error("同样已判定不可达，本轮没见到的那个该先走")
+	}
+	if _, ok := s.Get("v1:heredead"); !ok {
+		t.Error("还在名单里的节点不该在这一刀被裁掉，白删还丢探测历史")
+	}
+}
+
+// 同档、都不在名单里：缺席最久的先走。
+func TestTrimAbsentOrderOldestFirst(t *testing.T) {
+	s := newStoreWith(t,
+		node("v1:old", "old", "8.8.8.1", "JP", "tcp", 1194),
+		node("v1:fresh", "fresh", "8.8.8.2", "JP", "tcp", 1194),
+		node("v1:stay", "stay", "8.8.8.3", "JP", "tcp", 1194),
+	)
+	for _, id := range []string{"v1:old", "v1:fresh", "v1:stay"} {
+		feedProbe(t, s, id, true, 60, model.ServiceSoftEther, time.Hour)
+	}
+	apply(t, s, node("v1:stay", "stay", "8.8.8.3", "JP", "tcp", 1194))
+	// 同一轮里等不到 20 小时，直接把 old 的缺席钟拨早。
+	s.mu.Lock()
+	ago := time.Now().UTC().Add(-20 * time.Hour)
+	if n := s.nodes["v1:old"]; n != nil {
+		n.AbsentSince = &ago
+	}
+	s.mu.Unlock()
+
+	if d := s.Trim(Eviction{MaxNodes: 2}); d.Trimmed != 1 {
+		t.Fatalf("裁掉 %d 个，期望 1 个: %+v", d.Trimmed, d)
+	}
+	if _, ok := s.Get("v1:old"); ok {
+		t.Error("缺席最久的该先走")
+	}
+	for _, id := range []string{"v1:fresh", "v1:stay"} {
+		if _, ok := s.Get(id); !ok {
+			t.Errorf("%s 不该被裁掉", id)
+		}
+	}
+}
+
+// 自营机房节点在「保留机房」打开时不能被容量裁顺手清掉 —— 那是用户显式要的功能。
+func TestTrimKeepsVpngateOwnWhenAsked(t *testing.T) {
+	s := newStoreWith(t,
+		node("v1:own", "vpn-own", "8.8.9.9", "JP", "tcp", 1194),
+		node("v1:home", "home", "8.8.8.2", "JP", "tcp", 1194),
+	)
+	s.ApplyPurity(&model.PurityResult{IP: "8.8.9.9", CheckedAt: time.Now().UTC(),
+		Score: 60, Level: model.PurityGood, IPType: model.TypeVpngateOwn})
+	// 自营的先走：它分低（自营机房要扣分），但开关说留着。
+	if d := s.Trim(Eviction{MaxNodes: 1, KeepOwnNet: true}); d.Trimmed != 1 {
+		t.Fatalf("裁掉 %d 个，期望 1 个: %+v", d.Trimmed, d)
+	}
+	if _, ok := s.Get("v1:own"); !ok {
+		t.Error("keep_vpngate_own=true 时自营机房不该被容量裁掉")
+	}
+	// 关掉开关时它属于「明确不是想要的出口」，得排到硬伤那一档。
+	s2 := newStoreWith(t,
+		node("v1:own", "vpn-own", "8.8.9.9", "JP", "tcp", 1194),
+		node("v1:home", "home", "8.8.8.2", "JP", "tcp", 1194),
+	)
+	s2.ApplyPurity(&model.PurityResult{IP: "8.8.9.9", CheckedAt: time.Now().UTC(),
+		Score: 95, Level: model.PurityExcellent, IPType: model.TypeVpngateOwn})
+	if d := s2.Trim(Eviction{MaxNodes: 1}); d.Trimmed != 1 {
+		t.Fatalf("裁掉 %d 个，期望 1 个: %+v", d.Trimmed, d)
+	}
+	if _, ok := s2.Get("v1:own"); ok {
+		t.Error("默认不保留自营机房时，它该按硬伤先走，哪怕纯净度分很高")
+	}
+}
+
+// 配置里的上限要能传到裁剪：漏了这一项就等于功能没接上。
+func TestEvictionFromCarriesMaxNodes(t *testing.T) {
+	ev := EvictionFrom(config.SourcesConfig{KeepDays: 7, PurgeAbsentHours: 24, PurgeFailRounds: 3, MaxNodes: 1500})
+	if ev.MaxNodes != 1500 {
+		t.Errorf("Eviction.MaxNodes = %d，期望 1500", ev.MaxNodes)
+	}
+}
+
+// 升级兼容性：老快照里的第三方字段（cdn_commit / cdn_pool_commit）和
+// LastSource=cdn-pool 的遗留节点，加载时不能报错，也不能被当成「本轮还在名单里」。
+func TestNewLoadsLegacyPoolWithCDNFields(t *testing.T) {
+	dir := t.TempDir()
+	blob := `{"schema_version":1,` +
+		`"cdn_commit":"` + strings.Repeat("0", 40) + `",` +
+		`"cdn_pool_commit":"` + strings.Repeat("1", 40) + `",` +
+		`"nodes":{"v1:old":{"id":"v1:old","hostname":"old","ip":"8.8.8.9",` +
+		`"country":"JP","country_code":"JP","proto":"tcp","port":1194,"server":"8.8.8.9",` +
+		`"last_source":"cdn-pool","last_seen":"2020-01-01T00:00:00Z"}}}`
+	if err := os.WriteFile(filepath.Join(dir, "pool.json"), []byte(blob), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(dir)
+	if err != nil {
+		t.Fatalf("带第三方遗留字段的快照该照常加载: %v", err)
+	}
+	if s.Count() != 1 {
+		t.Fatalf("池子 = %d，期望 1", s.Count())
+	}
+	n, ok := s.Get("v1:old")
+	if !ok {
+		t.Fatal("遗留节点没读进来")
+	}
+	// 第三方池的 last_seen 是它自己的历史观测，不能当成「本轮在名单里」，
+	// 否则这个节点永远不会被过期淘汰，也不会被容量裁剪优先请走。
+	if presentInCurrentList(n) {
+		t.Error("LastSource=cdn-pool 的节点不该算「本轮在名单里」")
+	}
+	if d := s.Trim(Eviction{MaxNodes: 0}); d.Trimmed != 0 {
+		t.Errorf("max_nodes=0 是不限，不该裁掉遗留节点: %+v", d)
 	}
 }

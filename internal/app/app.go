@@ -195,6 +195,10 @@ func (a *App) Refresh(ctx context.Context) (*model.JobState, error) {
 	}
 
 	diff := a.store.ApplyRefresh(agg, store.EvictionFrom(a.Config().Sources))
+	// 过期淘汰只看「多久没见」，不看「池子多大」：官方主站 + 全部镜像一轮能给到
+	// 几千个，而探测一轮、写盘、拉纯净度都随池子线性变贵。所以再按容量上限裁一次。
+	trimmed := a.trimToCapacity()
+	left := diff.Total - trimmed
 	written, cerr := a.store.PutConfigs(agg.Configs)
 	if cerr != nil {
 		// 配置写盘失败不能算整轮失败：节点元数据已经进池子了，
@@ -206,11 +210,12 @@ func (a *App) Refresh(ctx context.Context) (*model.JobState, error) {
 	job.Total = len(agg.Nodes)
 	job.Done = len(agg.Nodes)
 	job.OK = diff.Added
-	job.Skipped = diff.Removed()
-	// 三个消失数分开写：过期是上游轮换，淘汰是把连续失败的 TCP 节点请出去，
-	// 自营剔除是用户不想要官方机房出口（开关 keep_vpngate_own）。
-	job.Message = fmt.Sprintf("节点 %d（新增 %d，过期清除 %d，缺席淘汰 %d，自营机房剔除 %d），配置正文新增 %d",
-		diff.Total, diff.Added, diff.Expired, diff.Purged, diff.DroppedOwn, written)
+	job.Skipped = diff.Removed() + trimmed
+	// 消失数分开写：过期是上游轮换，淘汰是把连续失败的 TCP 节点请出去，
+	// 自营剔除是用户不想要官方机房出口（开关 keep_vpngate_own），容量裁掉是
+	// 池子超出 max_nodes。
+	job.Message = fmt.Sprintf("节点 %d（新增 %d，过期清除 %d，缺席淘汰 %d，自营机房剔除 %d，容量裁掉 %d），配置正文新增 %d",
+		left, diff.Added, diff.Expired, diff.Purged, diff.DroppedOwn, trimmed, written)
 
 	// 家宽/自营判定不联网，顺手就做，让界面立刻有「residential」这一列。
 	if n := a.RefreshResidential(); n > 0 {
@@ -222,8 +227,9 @@ func (a *App) Refresh(ctx context.Context) (*model.JobState, error) {
 		job.Message += "；保存失败: " + err.Error()
 	}
 	a.bus.Publish("refresh:done", map[string]any{
-		"ok": true, "nodes": diff.Total, "added": diff.Added,
+		"ok": true, "nodes": left, "added": diff.Added,
 		"expired": diff.Expired, "purged": diff.Purged, "dropped_own": diff.DroppedOwn,
+		"trimmed": trimmed, "max_nodes": a.Config().Sources.MaxNodes,
 		"stats": a.store.Stats(), "warnings": agg.Warnings,
 	})
 	a.log.Printf("[app] 刷新完成: %s", job.Message)
@@ -254,8 +260,31 @@ func (a *App) RefreshResidential() int {
 	return changed
 }
 
-// EnsureConfig 保证某个节点的 .ovpn 正文在本地（累积池节点是按需拉的）。
-// 返回正文。已经本地有了就直接给，不发网络请求。
+// trimToCapacity 按当前配置的容量上限裁一次，返回裁掉的数量。
+//
+// 每轮刷新之后、启动加载之后、以及界面上改上限之后都走这里：三处必须是同一套
+// 规则，否则会出现「改了数字但池子没变」这种看起来没生效的状态。
+func (a *App) trimToCapacity() int {
+	return a.trimTo(store.EvictionFrom(a.Config().Sources))
+}
+
+// trimTo 是同一件事，但参数已经拿在手上。PatchConfig 走这条：它持着 cfgMu，
+// 再回头调 Config() 会自己等自己。而且那里要用的是刚算出来的新配置。
+func (a *App) trimTo(ev store.Eviction) int {
+	d := a.store.Trim(ev)
+	if d.Trimmed > 0 {
+		a.bus.Publish("pool:trim", map[string]any{
+			"trimmed": d.Trimmed, "total": d.Total, "max_nodes": ev.MaxNodes,
+		})
+	}
+	return d.Trimmed
+}
+
+// EnsureConfig 保证某个节点的 .ovpn 正文在本地，返回正文。已经本地有了就不发请求。
+//
+// 第三方累积池节点的正文以前是「按需从 CDN 取」的；那个源删掉后，缺正文只剩下
+// 一条补救路：重拉一轮官方全量（正文就在 CSV 里）。重拉还没有就是这个节点已经不
+// 在官方名单里了，直接报错，别给界面一份空文件。
 func (a *App) EnsureConfig(ctx context.Context, id string) ([]byte, error) {
 	n, ok := a.store.Get(id)
 	if !ok {
@@ -267,31 +296,16 @@ func (a *App) EnsureConfig(ctx context.Context, id string) ([]byte, error) {
 	if cfg, ok := a.store.Config(n.ConfigSHA256); ok {
 		return cfg, nil
 	}
-	if n.ConfigLocal {
-		// 声称有正文但磁盘上没有（手工删过 data 目录之类）：
-		// 从官方主站重拉一次全量 CSV 是最省事的补救，代价是一轮抓取。
-		if _, err := a.Refresh(ctx); err != nil {
-			return nil, fmt.Errorf("本地正文缺失且重拉失败: %w", err)
-		}
-		if cfg, ok := a.store.Config(n.ConfigSHA256); ok {
-			return cfg, nil
-		}
-		return nil, errors.New("重拉之后仍然没有这份配置正文")
+	// 正文不在盘上（自己删过 data 目录、或者节点是第三方源时代的遗留）：
+	// 重拉一轮官方名单是最省事的补救，代价是一轮抓取。
+	if _, err := a.Refresh(ctx); err != nil {
+		return nil, fmt.Errorf("本地正文缺失且重拉失败: %w", err)
 	}
-	_, poolCommit := a.store.Commits()
-	if poolCommit == "" {
-		return nil, errors.New("还没有累积池的 commit（先跑一轮刷新，或关闭 cdn.use_pool）")
+	if cfg, ok := a.store.Config(n.ConfigSHA256); ok {
+		a.store.MarkConfigLocal(id)
+		return cfg, nil
 	}
-	cfg, err := source.NewCDN(a.client, a.Config().Sources.CDN).FetchPoolConfig(ctx, poolCommit, n.ConfigSHA256)
-	if err != nil {
-		return nil, err
-	}
-	if err := a.store.SaveConfig(n.ConfigSHA256, cfg); err != nil {
-		return nil, fmt.Errorf("配置已校验但写盘失败: %w", err)
-	}
-	a.store.MarkConfigLocal(id)
-	a.bus.Publish("config:ready", map[string]any{"id": id, "sha": n.ConfigSHA256})
-	return cfg, nil
+	return nil, errors.New("重拉之后仍然没有这份配置正文（节点多半已不在官方名单里）")
 }
 
 // SaveState 把节点池和纯净度缓存落盘。串行为主，代价小、避免互相踩。
@@ -322,6 +336,6 @@ func joinSemi(xs []string) string {
 	return out
 }
 
-// HTTPClientForPoolConfig 是给 web 层留的口子（下载节点配置时要走 CDN）。
+// HTTPClient 给 web 层留的口子（下载配置之类要走网络时用）。
 // 现在没用到，保留是为了以后加「按需代理」时不用再翻 app 的接口。
 func (a *App) HTTPClient() *http.Client { return &http.Client{Timeout: 30 * time.Second} }

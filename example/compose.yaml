@@ -31,9 +31,9 @@ services:
       # 探测每 6 小时测完整个池子（一轮后再隔 1 小时自动补测一轮「说不清」的 TCP 节点）。
       # 填小会让每轮都重测上千个节点，上游和自己都累；真要更勤，建议改小 refresh、保持这里 360。
       VPNGATE_AGG_PROBE_INTERVAL: "360"
-      # 第三方名单（vpngate-list-mirror 镜像出来的，不是官方）默认关；
-      # 想让它多出来的历史节点和 Cloudflare 观测进来，就改成 "true"（界面设置页也能开）。
-      # VPNGATE_AGG_CDN_ENABLED: "true"
+      # 池子容量上限：超出就先请走硬伤的（已判定不可达 / 本轮名单里没有 / 从没测过），
+      # 再按推荐分从低到高删。0 = 不限（探测、写盘、纯净度都随池子线性变贵）。
+      VPNGATE_AGG_MAX_NODES: "1500"
       # 官方自营机房节点（public-vpn-* / 219.100.37.0/24）默认不保留：那是 SoftEther
       # 官方自己的机房出口，不是志愿者家宽。要全局出口稳定就改 "true"（设置页也有开关）。
       # VPNGATE_AGG_KEEP_VPNGATE_OWN: "true"

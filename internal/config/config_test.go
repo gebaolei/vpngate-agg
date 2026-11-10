@@ -15,8 +15,8 @@ var envVars = []string{
 	"VPNGATE_AGG_CONFIG", "VPNGATE_AGG_LISTEN", "VPNGATE_AGG_DATA_DIR", "VPNGATE_AGG_TITLE",
 	"VPNGATE_AGG_LOG_LEVEL", "VPNGATE_AGG_USER", "VPNGATE_AGG_PASSWORD", "VPNGATE_AGG_PBKDF2",
 	"VPNGATE_AGG_COOKIE_SECURE", "VPNGATE_AGG_DISABLE_AUTH", "VPNGATE_AGG_REFRESH_MINUTES",
-	"VPNGATE_AGG_PROBE_INTERVAL", "VPNGATE_AGG_PROBE_CONCURRENCY", "VPNGATE_AGG_PROBE_ENABLED",
-	"VPNGATE_AGG_CDN_ENABLED", "VPNGATE_AGG_CDN_POOL", "VPNGATE_AGG_KEEP_VPNGATE_OWN", "VPNGATE_AGG_PURITY_RPM", "VPNGATE_AGG_PURITY_ENABLED",
+	"VPNGATE_AGG_MAX_NODES", "VPNGATE_AGG_PROBE_INTERVAL", "VPNGATE_AGG_PROBE_CONCURRENCY", "VPNGATE_AGG_PROBE_ENABLED",
+	"VPNGATE_AGG_KEEP_VPNGATE_OWN", "VPNGATE_AGG_PURITY_RPM", "VPNGATE_AGG_PURITY_ENABLED",
 	"VPNGATE_AGG_API_ENABLED", "VPNGATE_AGG_API_TOKEN", "VPNGATE_AGG_API_INCLUDE_CONFIG", "VPNGATE_AGG_API_MAX_NODES", "VPNGATE_AGG_API_RATE_PER_MIN",
 	"IPQUERY_KEY", "IPINFO_TOKEN", "SCAMALYTICS_KEY", "IPQUALITYSCORE_KEY", "IPREGISTRY_KEY",
 	"ABUSEIPDB_KEY", "DBIP_KEY", "IP2LOCATION_KEY",
@@ -44,13 +44,15 @@ func TestDefaultsAreSane(t *testing.T) {
 	if c.Listen != ":8080" || c.DataDir != "data" {
 		t.Errorf("listen/data = %s / %s", c.Listen, c.DataDir)
 	}
-	// 官方主站和官方镜像站默认开；vpngate-list-mirror 是同类项目发布的非官方名单，
-	// 默认只当兜底（界面上可以打开），否则节点量就被一个第三方项目决定了。
+	// 官方主站和官方镜像站默认开；第三方名单（vpngate-list-mirror）已整段移除，
+	// 节点量只能由官方两个来源决定。
 	if !c.Sources.Vpngate.Enabled || !c.Sources.Mirrors.Enabled {
 		t.Error("官方主站和官方镜像站默认必须开着")
 	}
-	if c.Sources.CDN.Enabled {
-		t.Error("vpngate-list-mirror 兜底源默认应该关着（第三方发布的名单，不是官方数据）")
+	// 容量上限必须有默认值：官方主站 + 全部镜像一轮就能给到几千个，
+	// 不设上限会把第一轮探测和写盘规模直接顶满。
+	if c.Sources.MaxNodes != 1500 {
+		t.Errorf("池子容量上限默认应为 1500，实得 %d", c.Sources.MaxNodes)
 	}
 	if c.Sources.Mirrors.MaxMirrors != 0 {
 		t.Errorf("镜像站默认每轮全抓（0），实得 %d", c.Sources.Mirrors.MaxMirrors)
@@ -60,13 +62,7 @@ func TestDefaultsAreSane(t *testing.T) {
 			c.Sources.PurgeAbsentHours, c.Sources.PurgeFailRounds)
 	}
 	if c.Sources.KeepDays != 7 {
-		t.Errorf("节点保留天数 = %d，对齐 mirror 的 7 天", c.Sources.KeepDays)
-	}
-	if !strings.HasPrefix(c.Sources.CDN.IndexURL, "https://raw.githubusercontent.com/") {
-		t.Errorf("索引只在 Raw 上取，实得 %q", c.Sources.CDN.IndexURL)
-	}
-	if !strings.HasSuffix(c.Sources.CDN.CDNBase, "@") {
-		t.Errorf("CDN base 要以 @ 结尾（后面拼 commit）: %q", c.Sources.CDN.CDNBase)
+		t.Errorf("节点保留天数 = %d", c.Sources.KeepDays)
 	}
 	if !strings.Contains(c.Sources.UserAgent, "Mozilla") {
 		t.Error("默认 UA 要有，官方站在 UA 太怪时会拒")
@@ -199,8 +195,8 @@ func TestLoadMergesOverDefaults(t *testing.T) {
 	if c.Probe.TCPTimeoutSeconds != 5 {
 		t.Errorf("tcp 超时被默认值掏空了: %d", c.Probe.TCPTimeoutSeconds)
 	}
-	if c.Sources.CDN.Enabled || c.Sources.CDN.MaxNodes != 1500 {
-		t.Errorf("CDN 段被整段覆盖掉了: %+v", c.Sources.CDN)
+	if c.Sources.MaxNodes != 1500 {
+		t.Errorf("没写过的 max_nodes 该留默认值，实得 %d", c.Sources.MaxNodes)
 	}
 	if c.Auth.SessionHours != 168 {
 		t.Errorf("会话时长 = %d", c.Auth.SessionHours)
@@ -263,7 +259,7 @@ func TestEnvOverridesFile(t *testing.T) {
   "sources": {"refresh_interval_minutes": 30},
   "probe": {"enabled": true, "interval_minutes": 30, "concurrency": 16},
   "purity": {"requests_per_minute": 10},
-  "sources_cdn": true
+  "cdn": {"enabled": true, "use_pool": true}
 }`)
 	t.Setenv("VPNGATE_AGG_LISTEN", ":7000")
 	t.Setenv("VPNGATE_AGG_DATA_DIR", filepath.Join(dir, "from-env"))
@@ -273,11 +269,10 @@ func TestEnvOverridesFile(t *testing.T) {
 	t.Setenv("VPNGATE_AGG_COOKIE_SECURE", "true")
 	t.Setenv("VPNGATE_AGG_DISABLE_AUTH", "1")
 	t.Setenv("VPNGATE_AGG_REFRESH_MINUTES", "5")
+	t.Setenv("VPNGATE_AGG_MAX_NODES", "800")
 	t.Setenv("VPNGATE_AGG_PROBE_INTERVAL", "10")
 	t.Setenv("VPNGATE_AGG_PROBE_CONCURRENCY", "32")
 	t.Setenv("VPNGATE_AGG_PROBE_ENABLED", "false")
-	t.Setenv("VPNGATE_AGG_CDN_ENABLED", "off")
-	t.Setenv("VPNGATE_AGG_CDN_POOL", "no")
 	t.Setenv("VPNGATE_AGG_PURITY_RPM", "3")
 	t.Setenv("VPNGATE_AGG_PURITY_ENABLED", "false")
 
@@ -303,9 +298,16 @@ func TestEnvOverridesFile(t *testing.T) {
 	if c.Sources.RefreshIntervalMinutes != 5 || c.Probe.IntervalMinutes != 10 || c.Probe.Concurrency != 32 {
 		t.Errorf("数值覆盖没生效: %d / %d / %d", c.Sources.RefreshIntervalMinutes, c.Probe.IntervalMinutes, c.Probe.Concurrency)
 	}
-	if c.Probe.Enabled || c.Sources.CDN.Enabled || c.Sources.CDN.UsePool || c.Purity.Enabled {
-		t.Errorf("false/off/no 这几种写法没被认出来: probe=%v cdn=%v pool=%v purity=%v",
-			c.Probe.Enabled, c.Sources.CDN.Enabled, c.Sources.CDN.UsePool, c.Purity.Enabled)
+	if c.Sources.MaxNodes != 800 {
+		t.Errorf("max_nodes = %d，环境变量该盖过默认值", c.Sources.MaxNodes)
+	}
+	if c.Probe.Enabled || c.Purity.Enabled {
+		t.Errorf("false/off/no 这几种写法没被认出来: probe=%v purity=%v", c.Probe.Enabled, c.Purity.Enabled)
+	}
+	// 旧配置文件里残留的 cdn 段要安静地忽略（那个源已经移除）：不能报错拦启动，
+	// 也不能把别的配置带坑里。
+	if c.Sources.MaxNodes != 800 || !c.Sources.Mirrors.Enabled {
+		t.Errorf("残留的 cdn 段弄坏了配置: max_nodes=%d mirrors=%v", c.Sources.MaxNodes, c.Sources.Mirrors.Enabled)
 	}
 	if c.Purity.RequestsPerMinute != 3 {
 		t.Errorf("rpm = %d", c.Purity.RequestsPerMinute)
@@ -420,23 +422,29 @@ func TestValidateClampsAndRejects(t *testing.T) {
 			t.Error("purity.selection 非法值应报错")
 		}
 	})
-	t.Run("CDN base 形状", func(t *testing.T) {
+	t.Run("池子容量上限", func(t *testing.T) {
 		c := Default()
-		// 这个兜底源默认是关的，形状规则只管开着的源。
-		c.Sources.CDN.Enabled = true
-		c.Sources.CDN.CDNBase = "https://cdn.example.com/path"
+		c.Sources.MaxNodes = -1
 		if err := c.Validate(); err == nil {
-			t.Error("cdn_base 不以 @ 结尾应报错，否则拼出来的 URL 少一层 commit")
+			t.Error("max_nodes 为负应报错（要「不限」得写 0）")
 		}
-		c.Sources.CDN.Enabled = false
+		c = Default()
+		c.Sources.MaxNodes = 0
 		if err := c.Validate(); err != nil {
-			t.Errorf("关掉的兜底源不该拦启动: %v", err)
+			t.Errorf("0 = 不限，不该报错: %v", err)
+		}
+		c = Default()
+		c.Sources.MaxNodes = 999999
+		if err := c.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		if c.Sources.MaxNodes != 100000 {
+			t.Errorf("多打几个 0 该被压到 100000，实得 %d", c.Sources.MaxNodes)
 		}
 	})
 	t.Run("关掉源就别校验它", func(t *testing.T) {
 		c := Default()
-		c.Sources.CDN.Enabled = false
-		c.Sources.CDN.CDNBase = "随便写的"
+		c.Sources.Mirrors.Enabled = false
 		c.Probe.Enabled = false
 		c.Probe.Selection = "非法"
 		c.Purity.Enabled = false
@@ -444,14 +452,13 @@ func TestValidateClampsAndRejects(t *testing.T) {
 		if err := c.Validate(); err != nil {
 			t.Errorf("关掉的源不该拦启动: %v", err)
 		}
-		// 关掉的 CDN 也不该被填上默认 URL：空 URL 是有语义的。
+		// 关掉的镜像站也不该被填上默认地址：空值是「我自己指定」的语义。
 		c = Default()
-		c.Sources.CDN.Enabled = false
-		c.Sources.CDN.IndexURL = ""
-		c.Sources.CDN.CDNBase = ""
+		c.Sources.Mirrors.Enabled = false
+		c.Sources.Mirrors.SitesPage = ""
 		_ = c.Validate()
-		if c.Sources.CDN.IndexURL != "" || c.Sources.CDN.CDNBase != "" {
-			t.Errorf("关掉时别悄悄填默认值: %+v", c.Sources.CDN)
+		if c.Sources.Mirrors.SitesPage != "" {
+			t.Errorf("关掉时别悄悄填默认地址: %q", c.Sources.Mirrors.SitesPage)
 		}
 	})
 	t.Run("空必填项回落默认", func(t *testing.T) {
@@ -479,38 +486,6 @@ func TestValidateClampsAndRejects(t *testing.T) {
 			t.Error("全零配置该报错")
 		}
 	})
-}
-
-// 自定义 repo 时，索引和 CDN base 都要跟着换，否则还会去抓默认仓库。
-func TestCustomRepoDerivesURLs(t *testing.T) {
-	clearEnv(t)
-	dir := t.TempDir()
-	p := writeConfig(t, dir, `{"sources": {"cdn": {"repo": "me/my-mirror", "enabled": true}}}`)
-	c, err := Load(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(c.Sources.CDN.IndexURL, "me/my-mirror") {
-		t.Errorf("索引 URL = %q，只改 repo 时该跟着换", c.Sources.CDN.IndexURL)
-	}
-	if !strings.Contains(c.Sources.CDN.CDNBase, "me/my-mirror@") {
-		t.Errorf("CDN base = %q，只改 repo 时该跟着换", c.Sources.CDN.CDNBase)
-	}
-
-	// 自己写死的索引地址不能被改写。
-	p2 := writeConfig(t, t.TempDir(), `{
-  "sources": {"cdn": {"repo": "me/my-mirror", "index_url": "https://example.com/idx.json", "cdn_base": "https://cdn.example.com/gh/me/my-mirror@"}}
-}`)
-	c2, err := Load(p2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c2.Sources.CDN.IndexURL != "https://example.com/idx.json" {
-		t.Errorf("显式索引被改写了: %q", c2.Sources.CDN.IndexURL)
-	}
-	if c2.Sources.CDN.CDNBase != "https://cdn.example.com/gh/me/my-mirror@" {
-		t.Errorf("显式 CDN base 被改写了: %q", c2.Sources.CDN.CDNBase)
-	}
 }
 
 func TestSaveRoundTrip(t *testing.T) {

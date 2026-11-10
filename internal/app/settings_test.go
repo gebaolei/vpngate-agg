@@ -23,6 +23,7 @@ func TestPatchConfigNumbers(t *testing.T) {
 	cfg, err := a.PatchConfig(ConfigPatch{
 		KeepDays:               pi(30),
 		PurgeFailRounds:        pi(5),
+		MaxNodes:               pi(1200),
 		ProbeIntervalMinutes:   pi(120),
 		ProbeConcurrency:       pi(128),
 		ProbeTCPTimeoutSeconds: pi(8),
@@ -39,6 +40,7 @@ func TestPatchConfigNumbers(t *testing.T) {
 	}{
 		{"sources.keep_days", cfg.Sources.KeepDays, 30},
 		{"sources.purge_fail_rounds", cfg.Sources.PurgeFailRounds, 5},
+		{"sources.max_nodes", cfg.Sources.MaxNodes, 1200},
 		{"probe.interval_minutes", cfg.Probe.IntervalMinutes, 120},
 		{"probe.concurrency", cfg.Probe.Concurrency, 128},
 		{"probe.tcp_timeout_seconds", cfg.Probe.TCPTimeoutSeconds, 8},
@@ -64,6 +66,9 @@ func TestPatchConfigNumbers(t *testing.T) {
 		t.Errorf("磁盘上的配置不对: keep_days=%d concurrency=%d rpm=%d",
 			back.Sources.KeepDays, back.Probe.Concurrency, back.Purity.RequestsPerMinute)
 	}
+	if back.Sources.MaxNodes != 1200 {
+		t.Errorf("磁盘上的 max_nodes = %d，期望 1200", back.Sources.MaxNodes)
+	}
 
 	// 越界一律拒，而且拒了以后内存里那份不能被改动一半。
 	for _, bad := range []ConfigPatch{
@@ -71,6 +76,8 @@ func TestPatchConfigNumbers(t *testing.T) {
 		{KeepDays: pi(500)},       // 明显是填错
 		{PurgeFailRounds: pi(0)},  // 连负 0 轮就删，等于缺席即删
 		{PurgeFailRounds: pi(99)}, // 永远碰不到，等于这功能失效
+		{MaxNodes: pi(-1)},        // 要「不限」得写 0，负数是填错
+		{MaxNodes: pi(200000)},    // 多打几个 0：探测一轮就是几个小时
 		{ProbeIntervalMinutes: pi(0)},
 		{ProbeIntervalMinutes: pi(100000)},
 		{ProbeConcurrency: pi(0)},
@@ -187,28 +194,148 @@ func TestLoopWaitsWhenIntervalDisabled(t *testing.T) {
 }
 
 // 官方主站是必开来源：接口不该接受把它关掉的请求（ConfigPatch 里就没这个字段）。
-// 「三个来源全关」这条守卫现在只剩配置文件里把主站也关了才碰得到 —— 这里就是测那条。
+// 「两个来源全关」这条守卫现在只剩配置文件里把主站也关了才碰得到 —— 这里就是测那条。
 func TestPatchConfigKeepsVpngateOn(t *testing.T) {
 	a := testApp(t)
 
-	// 界面把镜像和第三方都关掉：允许，主站还在。
-	cfg, err := a.PatchConfig(ConfigPatch{MirrorsEnabled: ptrBool(false), CDNEnabled: ptrBool(false)})
+	// 界面把镜像关掉：允许，主站还在。
+	cfg, err := a.PatchConfig(ConfigPatch{MirrorsEnabled: ptrBool(false)})
 	if err != nil {
-		t.Fatalf("关掉镜像和第三方应允许: %v", err)
+		t.Fatalf("关掉镜像站应允许: %v", err)
 	}
 	if !cfg.Sources.Vpngate.Enabled {
 		t.Error("官方主站应一直开着")
 	}
 
-	// 配置文件里把主站也关了（连不上 www.vpngate.net 的部署），这时再把剩下两个关掉要拦住。
+	// 配置文件里把主站也关了（连不上 www.vpngate.net 的部署），这时再把镜像站关掉要拦住。
 	a.setCfg(func(c *config.Config) { c.Sources.Vpngate.Enabled = false })
-	if _, err := a.PatchConfig(ConfigPatch{MirrorsEnabled: ptrBool(false), CDNEnabled: ptrBool(false)}); err == nil {
-		t.Error("三个来源全关应被拒绝")
+	if _, err := a.PatchConfig(ConfigPatch{MirrorsEnabled: ptrBool(false)}); err == nil {
+		t.Error("两个来源全关应被拒绝")
 	} else if !strings.Contains(err.Error(), "不能全关") {
 		t.Errorf("错误信息不好懂: %q", err)
 	}
-	// 被拒的那次应当整个不做：内存里还是「三个都关」的原样，没有被改成半个状态。
-	if cur := a.Config(); cur.Sources.Vpngate.Enabled || cur.Sources.Mirrors.Enabled || cur.Sources.CDN.Enabled {
+	// 被拒的那次应当整个不做：内存里还是「两个都关」的原样，没有被改成半个状态。
+	if cur := a.Config(); cur.Sources.Vpngate.Enabled || cur.Sources.Mirrors.Enabled {
 		t.Errorf("被拒的补丁改动了内存配置: %+v", cur.Sources)
+	}
+}
+
+// 界面上把容量上限改小：当场裁一次，不用等下一轮刷新。否则用户改完数字看到的
+// 还是旧池子，只能得出「这功能没生效」的结论。
+func TestPatchConfigTrimsOnCapacityChange(t *testing.T) {
+	a := testApp(t)
+	seed(t, a,
+		node("v1:a", "8.8.8.1", "JP", "tcp", 1194),
+		node("v1:b", "8.8.8.2", "JP", "tcp", 1194),
+		node("v1:c", "8.8.8.3", "JP", "tcp", 1194),
+		node("v1:d", "8.8.8.4", "JP", "tcp", 1194),
+		node("v1:e", "8.8.8.5", "JP", "tcp", 1194),
+	)
+	if got := a.Store().Count(); got != 5 {
+		t.Fatalf("种子池 = %d，期望 5", got)
+	}
+
+	if _, err := a.PatchConfig(ConfigPatch{MaxNodes: pi(2)}); err != nil {
+		t.Fatalf("改上限失败: %v", err)
+	}
+	if got := a.Store().Count(); got != 2 {
+		t.Errorf("上限改到 2 后池子 = %d，期望当场裁到 2", got)
+	}
+
+	// 改大不该删任何东西。
+	if _, err := a.PatchConfig(ConfigPatch{MaxNodes: pi(50)}); err != nil {
+		t.Fatalf("放宽上限失败: %v", err)
+	}
+	if got := a.Store().Count(); got != 2 {
+		t.Errorf("放宽上限后池子 = %d，期望还是 2", got)
+	}
+
+	// 0 = 不限：也不该删。
+	if _, err := a.PatchConfig(ConfigPatch{MaxNodes: pi(0)}); err != nil {
+		t.Fatalf("设成不限失败: %v", err)
+	}
+	if got := a.Store().Count(); got != 2 {
+		t.Errorf("不限时池子 = %d，期望还是 2", got)
+	}
+
+	// 非法值要拒，且不能动配置。
+	if _, err := a.PatchConfig(ConfigPatch{MaxNodes: pi(-5)}); err == nil {
+		t.Error("负数上限该被拒")
+	}
+	if got := a.Config().Sources.MaxNodes; got != 0 {
+		t.Errorf("被拒的补丁改了上限: %d", got)
+	}
+}
+
+// 上限是在程序停着的时候改的（旧版本攒下的池子已经涨过上限）：常驻启动就得先裁一次，
+// 否则第一轮探测要按超标的池子排班。
+func TestRunTrimsOverCapacityPool(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.DataDir = dir
+	cfg.Probe.Enabled = false
+	cfg.Sources.MaxNodes = 0 // 旧版本没这个概念：先把池子攒起来
+	a, err := New(cfg, discardLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed(t, a,
+		node("v1:a", "8.8.8.1", "JP", "tcp", 1194),
+		node("v1:b", "8.8.8.2", "JP", "tcp", 1194),
+		node("v1:c", "8.8.8.3", "JP", "tcp", 1194),
+		node("v1:d", "8.8.8.4", "JP", "tcp", 1194),
+		node("v1:e", "8.8.8.5", "JP", "tcp", 1194),
+	)
+	if err := a.SaveState(); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.Store().Count(); got != 5 {
+		t.Fatalf("不限时应攒到 5 个，实得 %d", got)
+	}
+
+	cfg.Sources.MaxNodes = 2
+	b, err := New(cfg, discardLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// New 不动手：`sources` 这类只读命令也走它，删节点得等到常驻启动。
+	if got := b.Store().Count(); got != 5 {
+		t.Errorf("New 不应当裁节点，实得 %d", got)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go b.Run(ctx)
+	waitForCount(t, b, 2)
+	cancel()
+
+	// 裁过要落盘：否则每次启动都重裁一遍，日志里永远是同一句。
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		cfg.Sources.MaxNodes = 0
+		c, err := New(cfg, discardLogger())
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := c.Store().Count()
+		if got == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("启动裁剪没落盘：重开读到的还是 %d", got)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// waitForCount 等常驻流水线把池子裁到 want：Run 里的裁剪是同步的，但测试把它
+// 跑在 goroutine 里，所以得轮一下而不是赌顺序。
+func waitForCount(t *testing.T, a *App, want int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for a.Store().Count() != want && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := a.Store().Count(); got != want {
+		t.Fatalf("池子 = %d，期望裁到 %d", got, want)
 	}
 }

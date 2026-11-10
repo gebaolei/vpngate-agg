@@ -13,6 +13,18 @@ import (
 // 「探测到一半，名单换了」和「同一段时间里连着打上游」两个问题。
 // 定时器只负责「到点了就叫一声」，真正能不能开工由各 busy 闸门决定。
 func (a *App) Run(ctx context.Context) {
+	// 开机先按容量上限裁一次：上限可能在程序停着的时候被改小（改了配置，或者旧版本
+	// 升上来时池子已经涨过上限），别让第一轮探测按超标的池子排班。
+	//
+	// 放在 Run 而不是 New：`sources` 这类只读命令也走 New()，不该随手删节点写盘。
+	// 走到这里已经是常驻进程，裁完直接落盘，免得每次启动都重裁一遍。
+	if n := a.trimToCapacity(); n > 0 {
+		a.log.Printf("[app] 启动时按容量上限裁掉 %d 个节点", n)
+		if err := a.store.Save(); err != nil {
+			a.log.Printf("[app] 启动裁剪后保存节点池失败: %v", err)
+		}
+	}
+
 	intervals := []struct {
 		name    string
 		current func() time.Duration

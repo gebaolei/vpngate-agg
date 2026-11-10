@@ -306,16 +306,3 @@ func TestMirrorStoreDisabledOrNil(t *testing.T) {
 		t.Errorf("关闭时不该返回源，实得 %v", got)
 	}
 }
-
-func TestPoolIndexURL(t *testing.T) {
-	cases := map[string]string{
-		"https://raw.githubusercontent.com/o/r/main/latest.json": "https://raw.githubusercontent.com/o/r/main/pool/latest.json",
-		"https://example.com/repo/latest.json":                   "https://example.com/repo/pool/latest.json",
-		"https://example.com/repo/other.json":                    "https://example.com/repo/pool/latest.json",
-	}
-	for in, want := range cases {
-		if got := poolIndexURL(config.CDNSource{IndexURL: in}); got != want {
-			t.Errorf("poolIndexURL(%q) = %q，期望 %q", in, got, want)
-		}
-	}
-}

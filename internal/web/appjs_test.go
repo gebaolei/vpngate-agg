@@ -102,8 +102,7 @@ func TestAppJSHasSettingsSections(t *testing.T) {
 	// 每个 POST 字段都要有人真的发出去，否则界面上点了没反应。
 	for _, field := range []string{
 		// 官方主站故意不在列表里：它是必开来源，界面不该给关掉它的入口。
-		"mirrors_enabled", "cdn_enabled", "cdn_pool_enabled",
-		"keep_vpngate_own", "keep_days", "purge_fail_rounds",
+		"mirrors_enabled", "keep_vpngate_own", "keep_days", "purge_fail_rounds", "max_nodes",
 		"probe_enabled", "probe_interval_minutes", "probe_concurrency",
 		"probe_tcp_timeout_seconds", "probe_udp_timeout_seconds", "probe_handshake",
 		"purity_enabled", "purity_rpm",
@@ -111,6 +110,43 @@ func TestAppJSHasSettingsSections(t *testing.T) {
 		if !strings.Contains(src, "'"+field+"'") {
 			t.Errorf("界面上没有任何控件提交 %q，后端加了字段但界面漏了", field)
 		}
+	}
+	// 容量上限的说明要讲清「先走硬伤的，再按推荐分」：只写「最多多少个」的话，
+	// 用户看不出被裁掉的是哪些节点，也不敢真去调它。
+	for _, want := range []string{"池子容量上限", "推荐分从低到高", "0 = 不限"} {
+		if !strings.Contains(src, want) {
+			t.Errorf("设置页里少了 %q，容量上限的解释不完整", want)
+		}
+	}
+	// 裁完要广播一声：界面上节点数少了一撮却没有任何说明，会被当成抓取出问题了。
+	if !strings.Contains(src, "'pool:trim'") {
+		t.Error("app.js 没处理 pool:trim 事件，容量裁剪在界面上是静默的")
+	}
+}
+
+// 第三方 Cloudflare 观测（来自已移除的 vpngate-list-mirror 源）现在只读不写。
+// 它必须被标成「已停更」，否则用户会把一份半年前的观测当成「现在还能连」。
+func TestAppJSMarksStaleCFProbe(t *testing.T) {
+	js, err := os.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatalf("读 app.js 失败: %v", err)
+	}
+	src := string(js)
+	for _, want := range []string{"function cfStale(", "CF_MAX_AGE_MS", "第三方源已移除"} {
+		if !strings.Contains(src, want) {
+			t.Errorf("app.js 少了 %q：过期 Cloudflare 观测没有按停更处理", want)
+		}
+	}
+	if !strings.Contains(src, "if (cfStale(n.cf_tcp))") {
+		t.Error("延迟列取 Cloudflare 口径时没检查观测是否过期")
+	}
+	html, err := os.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatalf("读 index.html 失败: %v", err)
+	}
+	// 两个下拉里的 Cloudflare 选项都要标上「已停更」。
+	if got := strings.Count(string(html), "Cloudflare 观测（已停更）"); got != 2 {
+		t.Errorf("index.html 里标了「已停更」的 Cloudflare 选项 = %d，期望 2（排序 + 延迟口径）", got)
 	}
 }
 

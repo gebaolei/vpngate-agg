@@ -619,9 +619,9 @@ func TestSettingsMasksAPIKeys(t *testing.T) {
 			t.Errorf("设置响应缺 %q", key)
 		}
 	}
-	// 设置页的源卡片要三个源都在，字段名要跟前端对上。
+	// 设置页的源卡片要两个源都在，字段名要跟前端对上。
 	sources, _ := pathOf(t, body, "sources").(map[string]any)
-	for _, name := range []string{"vpngate", "mirrors", "cdn"} {
+	for _, name := range []string{"vpngate", "mirrors"} {
 		if _, ok := sources[name].(map[string]any); !ok {
 			t.Errorf("sources 里缺 %s", name)
 		}
@@ -847,8 +847,9 @@ func TestSettingsUpdateToggles(t *testing.T) {
 		t.Fatalf("GET /api/settings = %d", resp.StatusCode)
 	}
 	src := body["sources"].(map[string]any)
-	if src["cdn"].(map[string]any)["enabled"] != false {
-		t.Errorf("第三方名单（vpngate-list-mirror）默认应关着，实际 %v", src["cdn"])
+	// 容量上限必须有默认值：界面要能在设置页里改它，改小了还得当场裁一次。
+	if src["max_nodes"].(float64) != 1500 {
+		t.Errorf("池子容量上限默认应为 1500，实际 %v", src["max_nodes"])
 	}
 	if src["keep_vpngate_own"] != false {
 		t.Errorf("自营机房节点（public-vpn-* / 自营网段）默认应不保留，实际 %v", src["keep_vpngate_own"])
@@ -857,16 +858,15 @@ func TestSettingsUpdateToggles(t *testing.T) {
 		t.Errorf("官方镜像站默认应「每轮全抓」，实际 max_mirrors=%v", src["mirrors"])
 	}
 
-	// 开第三方名单：没提的字段不能被顺手关掉。
+	// 改容量上限：没提的字段不能被顺手改掉。
 	resp, body = h.do(http.MethodPost, "/api/settings",
-		`{"cdn_enabled":true,"cdn_pool_enabled":false,"keep_vpngate_own":true}`, nil)
+		`{"max_nodes":800,"keep_vpngate_own":true}`, nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("POST /api/settings = %d: %v", resp.StatusCode, body)
 	}
 	src = body["sources"].(map[string]any)
-	cdn := src["cdn"].(map[string]any)
-	if cdn["enabled"] != true || cdn["use_pool"] != false {
-		t.Errorf("CDN 开关没写进响应: %v", cdn)
+	if src["max_nodes"].(float64) != 800 {
+		t.Errorf("max_nodes 没写进响应: %v", src["max_nodes"])
 	}
 	if src["vpngate"].(map[string]any)["enabled"] != true {
 		t.Errorf("没提的官方主站被改掉了: %v", src["vpngate"])
@@ -887,8 +887,8 @@ func TestSettingsUpdateToggles(t *testing.T) {
 	// 再 GET 一次：App 里那份配置真的换了，不是只回了个好看的响应。
 	_, body = h.get("/api/settings")
 	src = body["sources"].(map[string]any)
-	if src["cdn"].(map[string]any)["enabled"] != true {
-		t.Errorf("改完再读，CDN 还是 %v", src["cdn"])
+	if src["max_nodes"].(float64) != 800 {
+		t.Errorf("改完再读，max_nodes 还是 %v", src["max_nodes"])
 	}
 	// 改完要落盘，否则一重启开关就回到旧值。harness 没给 -config，所以落在数据目录里。
 	path, _ := body["config_path"].(string)
@@ -920,7 +920,11 @@ func TestSettingsUpdateToggles(t *testing.T) {
 	}
 
 	// 越界的数值要 422，而且不能把一半改动留在配置里。
-	for _, bad := range []string{`{"keep_days":0}`, `{"keep_days":500}`, `{"probe_concurrency":99999}`, `{"purity_rpm":-5}`} {
+	for _, bad := range []string{
+		`{"keep_days":0}`, `{"keep_days":500}`, `{"probe_concurrency":99999}`, `{"purity_rpm":-5}`,
+		// 上限要「不限」得写 0；负数是填错，十万以上是多打了 0。
+		`{"max_nodes":-1}`, `{"max_nodes":200000}`,
+	} {
 		resp, body = h.do(http.MethodPost, "/api/settings", bad, nil)
 		if resp.StatusCode != http.StatusUnprocessableEntity {
 			t.Errorf("%s = %d，期望 422: %v", bad, resp.StatusCode, body)
@@ -932,25 +936,25 @@ func TestSettingsUpdateToggles(t *testing.T) {
 	}
 
 	// 官方主站是必开来源：界面没有这个开关，接口也不接受把它关掉。
-	// 镜像 + 第三方同时关掉是允许的（只剩主站约 100 个节点，仍然能拉到新节点）。
+	// 只关镜像站是允许的（只剩主站约 100 个节点，仍然能拉到新节点）。
 	resp, body = h.do(http.MethodPost, "/api/settings",
-		`{"vpngate_enabled":false,"mirrors_enabled":false,"cdn_enabled":false}`, nil)
+		`{"vpngate_enabled":false,"mirrors_enabled":false}`, nil)
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("关掉镜像和第三方 = %d，期望 200: %v", resp.StatusCode, body)
+		t.Fatalf("关掉镜像站 = %d，期望 200: %v", resp.StatusCode, body)
 	}
 	src = body["sources"].(map[string]any)
 	if src["vpngate"].(map[string]any)["enabled"] != true {
 		t.Error("官方主站被关掉了：接口不该接受 vpngate_enabled=false")
 	}
-	if src["mirrors"].(map[string]any)["enabled"] != false || src["cdn"].(map[string]any)["enabled"] != false {
-		t.Errorf("镜像 / 第三方没关掉: %v", src)
+	if src["mirrors"].(map[string]any)["enabled"] != false {
+		t.Errorf("镜像站没关掉: %v", src)
 	}
 	if resp, _ = h.do(http.MethodPost, "/api/settings", `{"mirrors_enabled":true}`, nil); resp.StatusCode != http.StatusOK {
 		t.Errorf("恢复镜像开关失败 = %d", resp.StatusCode)
 	}
 
 	// 和别的写接口一样要 CSRF。
-	resp, _ = h.do(http.MethodPost, "/api/settings", `{"cdn_enabled":false}`, &callOpts{csrf: "-"})
+	resp, _ = h.do(http.MethodPost, "/api/settings", `{"max_nodes":900}`, &callOpts{csrf: "-"})
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("缺 CSRF = %d，期望 403", resp.StatusCode)
 	}
@@ -960,8 +964,45 @@ func TestSettingsUpdateToggles(t *testing.T) {
 		t.Errorf("非法 JSON = %d，期望 400", resp.StatusCode)
 	}
 	// 未登录改不了。
-	resp, _ = h.do(http.MethodPost, "/api/settings", `{"cdn_enabled":true}`, &callOpts{noCookie: true})
+	resp, _ = h.do(http.MethodPost, "/api/settings", `{"max_nodes":900}`, &callOpts{noCookie: true})
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("未登录改开关 = %d，期望 401", resp.StatusCode)
+	}
+}
+
+// 界面上把容量上限改小：池子要当场裁到位，/api/stats 立刻能看到少掉的数。
+// 只回一份好看的配置响应不算数 —— 用户点完就想看到池子变小。
+func TestSettingsUpdateTrimsPoolToCapacity(t *testing.T) {
+	h := newHarness(t, "容量裁剪", nil)
+	h.login()
+	seedNodes(t, h.app)
+
+	_, body := h.get("/api/stats")
+	if got := pathOf(t, body, "stats").(map[string]any)["pool_nodes"].(float64); got != 4 {
+		t.Fatalf("种子池 = %v，期望 4", got)
+	}
+	if got := body["max_nodes"].(float64); got != 1500 {
+		t.Errorf("stats 里的 max_nodes = %v，期望默认 1500", got)
+	}
+
+	resp, body := h.do(http.MethodPost, "/api/settings", `{"max_nodes":2}`, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /api/settings = %d: %v", resp.StatusCode, body)
+	}
+	if got := body["sources"].(map[string]any)["max_nodes"].(float64); got != 2 {
+		t.Errorf("响应里的 max_nodes = %v，期望 2", got)
+	}
+
+	_, body = h.get("/api/stats")
+	stats := pathOf(t, body, "stats").(map[string]any)
+	if got := stats["pool_nodes"].(float64); got != 2 {
+		t.Errorf("改上限后 pool_nodes = %v，期望当场裁到 2", got)
+	}
+	if got := body["max_nodes"].(float64); got != 2 {
+		t.Errorf("stats 里的 max_nodes = %v，期望 2", got)
+	}
+	// 列表接口也得跟着少：不能只有统计口径变小。
+	if _, body = h.get("/api/nodes?limit=50"); body["total"].(float64) != 2 {
+		t.Errorf("/api/nodes total = %v，期望 2", body["total"])
 	}
 }

@@ -31,8 +31,6 @@ type snapshot struct {
 	SchemaVersion int                    `json:"schema_version"`
 	Meta          model.Meta             `json:"meta"`
 	PrevCounts    map[string]int         `json:"prev_counts"`
-	Commit        string                 `json:"cdn_commit"`
-	PoolCommit    string                 `json:"cdn_pool_commit"`
 	Nodes         map[string]*model.Node `json:"nodes"`
 }
 
@@ -45,8 +43,6 @@ type Store struct {
 	byIP       map[string][]string // IP → 节点 ID，纯净度按 IP 回写要用
 	meta       model.Meta
 	prevCounts map[string]int
-	cdnCommit  string
-	poolCommit string
 	lastSave   time.Time
 	// dirty 为 true 表示自上次落盘后有变化。定时落盘只在脏的时候写。
 	dirty bool
@@ -99,7 +95,6 @@ func New(dir string) (*Store, error) {
 	if s.prevCounts == nil {
 		s.prevCounts = map[string]int{}
 	}
-	s.cdnCommit, s.poolCommit = snap.Commit, snap.PoolCommit
 	var cfgFixed int
 	for id, n := range s.nodes {
 		if n == nil {
@@ -151,6 +146,8 @@ type Eviction struct {
 	KeepDays   int
 	AbsentFor  time.Duration
 	FailRounds int
+	// MaxNodes 是池子的容量上限，<= 0 表示不限。超出来的部分由 Trim 请出去。
+	MaxNodes int
 	// KeepOwnNet 保留 VPN Gate 自营机房节点（public-vpn-* / 自营网段）。
 	// 默认 false：那是官方自己的机房出口，跟「志愿者家宽」是两回事。
 	KeepOwnNet bool
@@ -159,7 +156,7 @@ type Eviction struct {
 // EvictionFrom 把配置换算成淘汰门槛，省得调用处各写一遍单位换算。
 func EvictionFrom(s config.SourcesConfig) Eviction {
 	return Eviction{KeepDays: s.KeepDays, AbsentFor: s.PurgeAbsent(), FailRounds: s.PurgeFailRounds,
-		KeepOwnNet: s.KeepVpngateOwn}
+		MaxNodes: s.MaxNodes, KeepOwnNet: s.KeepVpngateOwn}
 }
 
 // RefreshDiff 是一轮刷新对池子的改动。界面上要把「到期清除」和「提前淘汰」分开显示：
@@ -272,7 +269,6 @@ func (s *Store) ApplyRefresh(agg *source.Aggregated, ev Eviction) RefreshDiff {
 	if agg.MirrorErr != "" {
 		s.meta.Notes = []string{"镜像列表页: " + agg.MirrorErr}
 	}
-	s.cdnCommit, s.poolCommit = agg.Commit, agg.PoolCommit
 	for u, c := range agg.CountsByURL {
 		s.prevCounts[u] = c
 	}
@@ -283,14 +279,134 @@ func (s *Store) ApplyRefresh(agg *source.Aggregated, ev Eviction) RefreshDiff {
 
 // presentInCurrentList 判断某个节点本轮是不是真的在名单里。
 //
-// 累积池（cdn-pool）的节点是第三方项目的历史观测，它自己的 last_seen 可能已经
-// 好几天没被官方见过；把「池里还有」当成「本轮在名单里」会让过期和淘汰都不发生。
-// 所以 -pool 结尾的来源不算本轮在场。
+// 旧的第三方累积池节点（LastSource 以 -pool 结尾）可能还停在盘上：它带的 last_seen
+// 是第三方自己的历史观测，可能已经好几天没被官方见过；把「池里还有」当成
+// 「本轮在名单里」会让过期和淘汰都不发生。所以 -pool 结尾的来源不算在场。
 func presentInCurrentList(n *model.Node) bool {
 	if n == nil {
 		return false
 	}
 	return !strings.HasSuffix(n.LastSource, "-pool")
+}
+
+// TrimDiff 是容量裁剪的结果。
+type TrimDiff struct {
+	Trimmed int `json:"trimmed"` // 本轮被请出去的数量
+	Total   int `json:"total"`   // 裁完剩下的池子规模
+}
+
+// 容量裁剪的分档：数字小的先走。分档是为了不让「分低但还活着」的排在
+// 「明确已死」前面 —— 只按分数排会出现空壳节点比已死节点活得久。
+const (
+	trimDead       = 0 // 已判定不可达
+	trimBadType    = 1 // 纯净度说是机房 / 代理 / Tor / CDN（自营看开关）
+	trimNoEvidence = 2 // 从没测过、本轮名单里也没有的空壳
+	trimAbsent     = 3 // 本轮名单里没有（按缺席多久排）
+	trimInList     = 4 // 本轮名单里还有：最后才动它
+)
+
+// Trim 按容量上限裁池子：超出 MaxNodes 的部分一次裁到位。MaxNodes <= 0 = 不限。
+//
+// 为什么要上限：官方主站 + 全部镜像一轮就能给到几千个，而探测一轮、写盘、
+// 拉纯净度都随池子线性变贵；上限就是把「这个池子最多养多少节点」说清。
+//
+// 两刀，先硬伤后择优：
+//
+//   - 硬伤：已判定不可达的、纯净度说是机房/代理/Tor 的、从没测过又本轮没见到的、
+//     本轮名单里没有的（越久没见越先走）。
+//   - 择优：还超就按推荐分从低到高删。
+//
+// 同一档里先删「本轮不在名单里」的：删了不会下一轮又被抓回来，池子是真变小；
+// 删「名单里还有」的等于白删，还白白丢掉我们攒的探测历史。
+func (s *Store) Trim(ev Eviction) TrimDiff {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var diff TrimDiff
+	if ev.MaxNodes <= 0 || len(s.nodes) <= ev.MaxNodes {
+		diff.Total = len(s.nodes)
+		return diff
+	}
+
+	type victim struct {
+		id     string
+		bucket int
+		inList bool
+		absent time.Time // 缺席起点；还在名单里的为零值
+		score  float64
+	}
+	list := make([]victim, 0, len(s.nodes))
+	for id, n := range s.nodes {
+		// 「本轮在名单里」得看 ApplyRefresh 每轮刷的那个标记：LastSource 只记最后
+		// 是谁给的，节点本轮没被任何源见到时它仍指向上一次的来源。
+		in := (n.InLatestSource == nil || *n.InLatestSource) && presentInCurrentList(n)
+		bucket := trimInList
+		switch {
+		case model.HealthLevel(n.Health) == "down":
+			bucket = trimDead
+		case badTypeForTrim(n, ev):
+			bucket = trimBadType
+		case !in && len(n.Probes) == 0:
+			bucket = trimNoEvidence
+		case !in:
+			bucket = trimAbsent
+		}
+		var absent time.Time
+		if n.AbsentSince != nil {
+			absent = *n.AbsentSince
+		} else if !in {
+			absent = n.LastSeen
+		}
+		list = append(list, victim{
+			id: id, bucket: bucket, inList: in, absent: absent,
+			score: RecommendScore(n, "best"),
+		})
+	}
+
+	sort.Slice(list, func(i, j int) bool {
+		a, b := list[i], list[j]
+		if a.bucket != b.bucket {
+			return a.bucket < b.bucket
+		}
+		if a.inList != b.inList {
+			return !a.inList // 不在名单里的先走
+		}
+		if !a.absent.Equal(b.absent) {
+			return a.absent.Before(b.absent) // 越久没见的先走
+		}
+		if a.score != b.score {
+			return a.score < b.score // 分低的先走
+		}
+		return a.id < b.id // 兜底：固定顺序，别让 map 随机决定删谁
+	})
+
+	over := len(s.nodes) - ev.MaxNodes
+	for _, v := range list[:over] {
+		n := s.nodes[v.id]
+		delete(s.nodes, v.id)
+		if n != nil {
+			s.unindexIP(n.IP, v.id)
+		}
+		diff.Trimmed++
+	}
+	s.dirty = true
+	diff.Total = len(s.nodes)
+	return diff
+}
+
+// badTypeForTrim 看纯净度结论是不是「明确不是想要的出口」。自营机房看 KeepOwnNet
+// 开关：用户显式要保留官方机房出口时，不该在容量裁剪里被顺手清掉。
+func badTypeForTrim(n *model.Node, ev Eviction) bool {
+	if n == nil || n.Purity == nil {
+		return false
+	}
+	switch n.Purity.IPType {
+	case model.TypeHosting, model.TypeVPNProxy, model.TypeTor, model.TypeCDN:
+		return true
+	case model.TypeVpngateOwn:
+		return !ev.KeepOwnNet
+	}
+	return false
 }
 
 // UpdateFailRounds 在一轮探测结束时更新「连续明确失败轮数」，对齐 mirror 的
@@ -419,8 +535,6 @@ func (s *Store) Save() error {
 		SchemaVersion: SchemaVersion,
 		Meta:          s.meta,
 		PrevCounts:    s.prevCounts,
-		Commit:        s.cdnCommit,
-		PoolCommit:    s.poolCommit,
 		Nodes:         s.nodes,
 	}
 	s.mu.RUnlock()
@@ -544,13 +658,6 @@ func (s *Store) PrevCounts() map[string]int {
 		out[k] = v
 	}
 	return out
-}
-
-// Commits 返回镜像的单快照 commit 与累积池 commit（按需拉池配置要用）。
-func (s *Store) Commits() (commit, poolCommit string) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.cdnCommit, s.poolCommit
 }
 
 // SetJob 记录某类任务的进展。kind 是 refresh/probe/purity。

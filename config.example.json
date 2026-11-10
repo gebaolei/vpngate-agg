@@ -13,13 +13,15 @@
     "disable_auth": false
   },
   "sources": {
-    "_comment": "默认只拉官方：主站 API + sites.aspx 上列出的全部镜像站（按 /24 去重后每轮全抓，max_mirrors=0 就是「全抓」）。cdn 段是第三方项目 vpngate-list-mirror 镜像出来的名单，不是 VPN Gate 官方，默认关掉；想要它多出来的节点和 Cloudflare 观测，就在界面设置页打开，或者这里写 enabled: true。",
-    "_ui": "源开关、保留机房节点、keep_days、purge_fail_rounds、探测开关/间隔/并发/两个超时、纯净度开关与每分钟限流，在界面设置页也能改（节点配置 / 可用性探查 / IP 纯净度检查 三块）；其余只在这里改，改完重启。",
+    "_comment": "只拉官方：主站 API + sites.aspx 上列出的全部镜像站（按 /24 去重后每轮全抓，max_mirrors=0 就是「全抓」）。第三方名单（vpngate-list-mirror）已整段移除：节点量不再由第三方项目决定；老配置里残留的 cdn 段会被忽略。",
+    "_ui": "源开关、保留机房节点、keep_days、purge_fail_rounds、max_nodes、探测开关/间隔/并发/两个超时、纯净度开关与每分钟限流，在界面设置页也能改（节点配置 / 可用性探查 / IP 纯净度检查 三块）；其余只在这里改，改完重启。",
     "_purge": "淘汰规则：本轮名单里没有的节点先留 keep_days 天；TCP 节点缺席满 purge_absent_hours，且连续 purge_fail_rounds 轮明确失败（refused / unreachable / blocked）就提前剔除。超时和不回包不算明确失败，UDP 也不提前剔除（它本来就不回包）。",
+    "_capacity": "max_nodes 是池子的容量上限：每轮刷新并入后、启动时、界面上改上限时，超出来的部分会被请出去 —— 先走硬伤的（已判定不可达、纯净度说是机房/代理/Tor、本轮名单里没有、从没测过的空壳），还超就按推荐分从低到高删。0 = 不限。",
     "refresh_interval_minutes": 60,
     "keep_days": 7,
     "purge_absent_hours": 24,
     "purge_fail_rounds": 3,
+    "max_nodes": 1500,
     "_own": "自营机房节点：hostname public-vpn-* 或落在 219.100.37.0/24（SoftEther 官方放在学术网里的机器）。默认 false = 不保留，因为要家宽出口的人不想要它；打开就留着换全局出口稳定。关掉后新抓的不进池，池里已有的下一轮清掉。",
     "keep_vpngate_own": false,
     "vpngate": {
@@ -36,17 +38,6 @@
       "list_max_hours": 12,
       "timeout_seconds": 30,
       "min_nodes": 20
-    },
-    "cdn": {
-      "enabled": false,
-      "repo": "GeorgeXie2333/vpngate-list-mirror",
-      "index_url": "https://raw.githubusercontent.com/GeorgeXie2333/vpngate-list-mirror/main/latest.json",
-      "cdn_base": "https://cdn.jsdelivr.net/gh/GeorgeXie2333/vpngate-list-mirror@",
-      "fallback_raw": true,
-      "use_pool": true,
-      "pool_max_age_hours": 72,
-      "max_nodes": 1500,
-      "timeout_seconds": 60
     },
     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
   },

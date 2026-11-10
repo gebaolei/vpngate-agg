@@ -95,6 +95,14 @@ function hasTime(t) {
   return !isNaN(d.getTime()) && d.getUTCFullYear() >= 1971;
 }
 
+// Cloudflare 观测只来自已移除的第三方源（现在只读不写）：超过 7 天就当历史参考，
+// 不能当成「现在能不能用」的依据。
+const CF_MAX_AGE_MS = 7 * 86400 * 1000;
+function cfStale(cf) {
+  if (!cf || !hasTime(cf.checked_at)) return true;
+  return Date.now() - new Date(cf.checked_at).getTime() > CF_MAX_AGE_MS;
+}
+
 function fmtRel(t) {
   if (!hasTime(t)) return '–';
   const d = new Date(t);
@@ -330,6 +338,12 @@ function handleEvent(e) {
       scheduleReloadNodes();
       break;
     }
+    case 'pool:trim':
+      // 容量裁剪：上限到了就当场删，界面得说一声，不然只会看到节点少了一操。
+      toast(`容量上限 ${d.max_nodes}：裁掉 ${d.trimmed} 个节点，现余 ${d.total}`, 'ok', 4000);
+      loadStats();
+      scheduleReloadNodes();
+      break;
     case 'probe:one':
       loadNodes();
       break;
@@ -996,6 +1010,8 @@ function pickPing(n) {
   }
   if (state.pingSource === 'cloudflare') {
     const v = n.cf_tcp && n.cf_tcp.connect_ms ? n.cf_tcp.connect_ms : 0;
+    if (!n.cf_tcp) return { v: 0, src: '', note: '无 Cloudflare 观测' };
+    if (cfStale(n.cf_tcp)) return { v: v, src: v ? 'Cloudflare' : '', note: '观测已停更（第三方源已移除）', stale: true };
     return { v: v, src: v ? 'Cloudflare' : '', note: v ? '' : '无 Cloudflare 观测' };
   }
   // local 与后端同口径：优先最近一次成功的值，没有才退 EWMA。
@@ -1315,16 +1331,19 @@ function renderDrawer() {
   }
   body.appendChild(kvBlock('连通性（本机实测）', probeRows));
 
-  // Cloudflare 第三方观测
+  // Cloudflare 第三方观测。这个观测只来自已移除的第三方源，现在只读不写；
+  // 超过 7 天的就当参考资料，别当成“现在能不能用”。
   if (n.cf_tcp) {
     const cf = n.cf_tcp;
-    body.appendChild(kvBlock('Cloudflare Worker 观测（第三方）', [
+    const rows = [
       ['状态', ({ reachable: '可达', unreachable: '不可达', unknown: '未知', not_applicable: '不适用（UDP）' })[cf.status] || cf.status],
       ['观测时间', hasTime(cf.checked_at) ? fmtRel(cf.checked_at) : '–'],
       ['建连耗时', cf.connect_ms ? fmtMs(cf.connect_ms) : '–'],
       ['连续失败', cf.consecutive_failures || 0],
       ['成功端点', cf.connected_endpoint || ''],
-    ]));
+    ];
+    if (cfStale(cf)) rows.push(['备注', '第三方源已移除，这份观测不再更新，只当历史参考']);
+    body.appendChild(kvBlock('Cloudflare Worker 观测（第三方）', rows));
   }
 
   // 纯净度
@@ -1659,19 +1678,19 @@ function settingStatus(sec, label, hint, state) {
 function settingsNodes(s) {
   const src = s.sources || {};
   const mi = src.mirrors || {};
-  const cdn = src.cdn || {};
+  const total = ((state.stats && state.stats.stats) || {}).nodes || 0;
   const sec = settingsSection('节点配置', '拉哪些名单、留多久、怎么淘汰。官方主站是必开来源，不在开关里。',
-    '开关下一轮生效；天数和轮数立即生效，正在跑的那一轮不变。要连官方主站一起关只能改配置文件里的 sources.vpngate.enabled。');
+    '开关下一轮生效；天数、轮数、容量上限立即生效（改小上限会当场裁一次），正在跑的那一轮不变。要连官方主站一起关只能改配置文件里的 sources.vpngate.enabled。');
 
   settingsGroupLabel(sec, '来源');
   settingToggle(sec, '镜像站点', 'sites.aspx 上的官方镜像，按 /24 去重后每轮全抓', mi.enabled, 'mirrors_enabled');
-  settingToggle(sec, 'vpngate-list-mirror', '第三方镜像名单，不是 VPN Gate 官方', cdn.enabled, 'cdn_enabled');
-  settingToggle(sec, '含累积池', '多出来的老节点和它们的 .ovpn', cdn.use_pool, 'cdn_pool_enabled');
   settingToggle(sec, '保留机房节点', '官方自营机房（public-vpn-*、219.100.37.0/24），不是家宽', src.keep_vpngate_own, 'keep_vpngate_own');
 
   settingsGroupLabel(sec, '淘汰');
   settingNumber(sec, '最长缺席天数', '本轮名单里没有的节点，缺席满这么多天才删', src.keep_days, 'keep_days', { min: 1, max: 90, unit: '天' });
   settingNumber(sec, '最大失败次数', `缺席满 ${src.purge_absent_hours || 24}h 后，连负这么多轮明确失败就删`, src.purge_fail_rounds, 'purge_fail_rounds', { min: 1, max: 12, unit: '轮' });
+  settingsGroupLabel(sec, '容量');
+  settingNumber(sec, '池子容量上限', `当前 ${total} 个。超出上限就先请走硬伤的（已判定不可达、本轮名单里没有、从没测过），再按推荐分从低到高删；0 = 不限`, src.max_nodes ?? 0, 'max_nodes', { min: 0, max: 100000, unit: '个' });
   return sec;
 }
 

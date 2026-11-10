@@ -158,20 +158,20 @@
             <option value="score">官方分数</option>
             <option value="speed">官方速度</option>
             <option value="sessions">会话数</option>
-            <option value="cf">Cloudflare 观测</option>
+            <option value="cf">Cloudflare 观测（已停更）</option>
             <option value="tests">测试次数</option>
             <option value="seen">最近出现</option>
             <option value="hostname">名称</option>
           </select>
         </label>
         <button class="btn btn-icon" id="f-dir" data-dir="asc" title="切换升/降序">↑</button>
-        <label class="mini" title="默认只看本机实测：没测过的写「待测试」，测了但没连上写「未测出延迟」。官方 Ping 和 Cloudflare 观测要显式选才用（它们不代表你这张网）。">
+        <label class="mini" title="默认只看本机实测：没测过的写「待测试」，测了但没连上写「未测出延迟」。官方 Ping 和 Cloudflare 观测要显式选才用（它们不代表你这张网）；Cloudflare 观测来自已移除的第三方源，只当历史参考。">
           延迟口径
           <select id="f-ping-src">
             <option value="best">本机实测（EWMA）</option>
             <option value="local">本机实测（最近一次）</option>
             <option value="upstream">官方 Ping</option>
-            <option value="cloudflare">Cloudflare 观测</option>
+            <option value="cloudflare">Cloudflare 观测（已停更）</option>
           </select>
         </label>
         <label class="mini num">纯净度 ≥

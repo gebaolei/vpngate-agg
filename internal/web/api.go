@@ -120,7 +120,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"sources":         meta.SourceStats,
 		"mirrors":         meta.Mirrors,
 		"mirrors_fetched": meta.MirrorsFetched,
-		"cdn_commit":      cdnCommitOf(meta),
+		"max_nodes":       s.app.Config().Sources.MaxNodes, // 0 = 不限；界面拿它跟 pool_nodes 对比
 		"running":         s.app.Running(),
 		"purity": map[string]any{
 			"providers":  s.app.Purity().Stats(),
@@ -130,15 +130,6 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"last_save":      st.LastSave(),
 		"sources_config": sourcesSummary(s.cfg),
 	})
-}
-
-func cdnCommitOf(meta model.Meta) string {
-	for _, s := range meta.SourceStats {
-		if s.Name == "cdn" && s.Commit != "" {
-			return s.Commit
-		}
-	}
-	return ""
 }
 
 // handleNodes 是列表接口。参数见 parseFilter。
@@ -389,6 +380,15 @@ func (s *Server) settingsPayload(cfg config.Config) map[string]any {
 	}
 }
 
+// maxNodesText 把池子容量上限渲染成人话：0 = 不限。日志里写「上限=0」会被读成
+// 「池子空了」。
+func maxNodesText(n int) string {
+	if n <= 0 {
+		return "不限"
+	}
+	return strconv.Itoa(n)
+}
+
 // handleSettingsUpdate 接受界面上的配置项更新（POST /api/settings，走全局 CSRF 闸门）。
 func (s *Server) handleSettingsUpdate(w http.ResponseWriter, r *http.Request) {
 	var p app.ConfigPatch
@@ -403,19 +403,19 @@ func (s *Server) handleSettingsUpdate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	s.log.Printf("[web] 配置已更新（写回 %s）：镜像=%v CDN=%v 自营=%v 缺席天数=%d 淘汰连负=%d 探测间隔=%dm 并发=%d TCP超时=%ds UDP超时=%ds 纯净度=%v RPM=%d",
-		cfg.Path(), cfg.Sources.Mirrors.Enabled, cfg.Sources.CDN.Enabled, cfg.Sources.KeepVpngateOwn,
-		cfg.Sources.KeepDays, cfg.Sources.PurgeFailRounds,
+	s.log.Printf("[web] 配置已更新（写回 %s）：镜像=%v 自营=%v 缺席天数=%d 淘汰连负=%d 容量上限=%s 探测间隔=%dm 并发=%d TCP超时=%ds UDP超时=%ds 纯净度=%v RPM=%d",
+		cfg.Path(), cfg.Sources.Mirrors.Enabled, cfg.Sources.KeepVpngateOwn,
+		cfg.Sources.KeepDays, cfg.Sources.PurgeFailRounds, maxNodesText(cfg.Sources.MaxNodes),
 		cfg.Probe.IntervalMinutes, cfg.Probe.Concurrency,
 		cfg.Probe.TCPTimeoutSeconds, cfg.Probe.UDPTimeoutSeconds,
 		cfg.Purity.Enabled, cfg.Purity.RequestsPerMinute)
 	// 广播一下：另一个标签页开着时能立刻把开关改成新的，不会两边显示得不一样。
 	s.app.Bus().Publish("settings:changed", map[string]any{
-		"vpngate": cfg.Sources.Vpngate.Enabled,
-		"mirrors": cfg.Sources.Mirrors.Enabled,
-		"cdn":     cfg.Sources.CDN.Enabled,
-		"probe":   cfg.Probe.Enabled,
-		"purity":  cfg.Purity.Enabled,
+		"vpngate":   cfg.Sources.Vpngate.Enabled,
+		"mirrors":   cfg.Sources.Mirrors.Enabled,
+		"max_nodes": cfg.Sources.MaxNodes,
+		"probe":     cfg.Probe.Enabled,
+		"purity":    cfg.Purity.Enabled,
 	})
 	writeOK(w, s.settingsPayload(cfg))
 }
@@ -705,11 +705,6 @@ func sourcesSummary(cfg config.Config) []map[string]any {
 		{
 			"name": "mirrors", "label": "官方镜像站", "enabled": cfg.Sources.Mirrors.Enabled,
 			"url": cfg.Sources.Mirrors.SitesPage, "max_mirrors": cfg.Sources.Mirrors.MaxMirrors,
-		},
-		{
-			"name": "cdn", "label": "vpngate-list-mirror 镜像", "enabled": cfg.Sources.CDN.Enabled,
-			"url": cfg.Sources.CDN.IndexURL, "use_pool": cfg.Sources.CDN.UsePool,
-			"max_nodes": cfg.Sources.CDN.MaxNodes, "cdn_base": cfg.Sources.CDN.CDNBase,
 		},
 	}
 }

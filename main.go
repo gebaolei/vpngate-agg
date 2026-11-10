@@ -48,7 +48,7 @@ const usageText = `vpngate-agg —— VPN Gate 节点聚合 / 连通测试 / IP 
   purity   跑一轮 IP 纯净度检测
   export   导出 .ovpn（--out 写文件，否则 stdout）
   passwd   设置登录口令（不带参数则生成随机口令）
-  sources  看各来源最近一轮拿到多少、哪些源现在是关着的（只读磁盘，不联网）
+  sources  看各来源最近一轮拿到多少、淘汰与容量上限、哪些源现在是关着的（只读磁盘，不联网）
   version  打印版本
   help     打印本帮助
 
@@ -258,12 +258,14 @@ func runSources(cfg config.Config, logger *log.Logger, args []string) error {
 	}
 
 	fmt.Printf("池内 %d 个节点（本轮名单 %d），数据更新于 %s\n\n", st.PoolNodes, st.FreshNodes, at(st.UpdatedAt))
-	fmt.Printf("开关: 官方主站 %s · 官方镜像 %s（每轮%s）· 第三方名单 %s（累积池 %s）· 自营机房 %s\n",
+	fmt.Printf("开关: 官方主站 %s · 官方镜像 %s（每轮%s）· 自营机房 %s\n",
 		on(cfg.Sources.Vpngate.Enabled), on(cfg.Sources.Mirrors.Enabled),
-		mirrorsPerRoundText(cfg.Sources.Mirrors.MaxMirrors),
-		on(cfg.Sources.CDN.Enabled), on(cfg.Sources.CDN.UsePool), on(cfg.Sources.KeepVpngateOwn))
+		mirrorsPerRoundText(cfg.Sources.Mirrors.MaxMirrors), on(cfg.Sources.KeepVpngateOwn))
 	fmt.Printf("淘汰: 缺席满 %d 天过期；TCP 缺席满 %d 小时且连负 %d 轮明确失败则提前剔除\n",
 		cfg.Sources.KeepDays, cfg.Sources.PurgeAbsentHours, cfg.Sources.PurgeFailRounds)
+	// 容量上限是另一套规则：过期淘汰只看「多久没见」，容量裁剪只看「池子多大」。
+	fmt.Printf("容量: 上限 %s（当前 %d）· 超出先请走硬伤的（不可达 / 名单里没有 / 从没测过），再按推荐分从低到高\n",
+		maxNodesText(cfg.Sources.MaxNodes), st.PoolNodes)
 	// 家宽拆开数：来源认定和推导差一个可信度；「类型未知」必须说出来，
 	// 否则这个比例会被读成「绝大多数不是家宽」，而事实是没数据。
 	fmt.Printf("家宽: %d 个（%.1f%%）— 来源认定 %d · 推导 %d；查过但类型未知 %d\n",
@@ -288,8 +290,6 @@ func runSources(cfg config.Config, logger *log.Logger, args []string) error {
 			seen["vpngate"] = true
 		case strings.HasPrefix(s.Name, "mirror:"):
 			seen["mirror"] = true
-		case strings.HasPrefix(s.Name, "cdn"):
-			seen["cdn"] = true
 		}
 		fmt.Printf("  %-28s %6d 节点 %7dms  %s\n", s.Name, s.Nodes, s.MS, note)
 	}
@@ -303,17 +303,11 @@ func runSources(cfg config.Config, logger *log.Logger, args []string) error {
 	if !cfg.Sources.Mirrors.Enabled {
 		off = append(off, "官方镜像站")
 	}
-	if !cfg.Sources.CDN.Enabled {
-		off = append(off, "第三方名单（vpngate-list-mirror）")
-	}
 	if cfg.Sources.Vpngate.Enabled && !seen["vpngate"] {
 		silent = append(silent, "官方主站")
 	}
 	if cfg.Sources.Mirrors.Enabled && !seen["mirror"] {
 		silent = append(silent, "官方镜像站")
-	}
-	if cfg.Sources.CDN.Enabled && !seen["cdn"] {
-		silent = append(silent, "第三方名单")
 	}
 	if len(off) > 0 {
 		fmt.Printf("\n已关闭: %s（界面设置页或配置里可以打开）\n", strings.Join(off, "、"))
@@ -328,6 +322,14 @@ func runSources(cfg config.Config, logger *log.Logger, args []string) error {
 func mirrorsPerRoundText(n int) string {
 	if n <= 0 {
 		return "全部"
+	}
+	return strconv.Itoa(n)
+}
+
+// maxNodesText 把池子容量上限渲染成人话：0 = 不限。
+func maxNodesText(n int) string {
+	if n <= 0 {
+		return "不限"
 	}
 	return strconv.Itoa(n)
 }

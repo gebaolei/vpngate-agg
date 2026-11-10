@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/gebaolei/vpngate-agg/internal/config"
+	"github.com/gebaolei/vpngate-agg/internal/store"
 )
 
 // ConfigPatch 是界面上允许改的那几项开关和运行参数（POST /api/settings）。
@@ -15,12 +16,12 @@ type ConfigPatch struct {
 	// 官方主站不在这里：它是必开的来源，界面和接口都不给关掉。真要关（比如部署在
 	// 根本连不上 www.vpngate.net 的网络里，不想每轮白等一次超时）只能改配置文件。
 	MirrorsEnabled  *bool `json:"mirrors_enabled,omitempty"`
-	CDNEnabled      *bool `json:"cdn_enabled,omitempty"`
-	CDNPoolEnabled  *bool `json:"cdn_pool_enabled,omitempty"`
 	KeepVpngateOwn  *bool `json:"keep_vpngate_own,omitempty"`
 	MirrorsMax      *int  `json:"mirrors_max,omitempty"`
 	KeepDays        *int  `json:"keep_days,omitempty"`
 	PurgeFailRounds *int  `json:"purge_fail_rounds,omitempty"`
+	// MaxNodes 是节点池容量上限（0 = 不限）。改小了会当场裁一次。
+	MaxNodes *int `json:"max_nodes,omitempty"`
 
 	// ---- 可用性探查 ----
 	ProbeEnabled           *bool `json:"probe_enabled,omitempty"`
@@ -50,12 +51,6 @@ func (a *App) PatchConfig(p ConfigPatch) (config.Config, error) {
 	if p.MirrorsEnabled != nil {
 		next.Sources.Mirrors.Enabled = *p.MirrorsEnabled
 	}
-	if p.CDNEnabled != nil {
-		next.Sources.CDN.Enabled = *p.CDNEnabled
-	}
-	if p.CDNPoolEnabled != nil {
-		next.Sources.CDN.UsePool = *p.CDNPoolEnabled
-	}
 	if p.KeepVpngateOwn != nil {
 		next.Sources.KeepVpngateOwn = *p.KeepVpngateOwn
 	}
@@ -73,6 +68,13 @@ func (a *App) PatchConfig(p ConfigPatch) (config.Config, error) {
 			return a.cfg, fmt.Errorf("最大失败次数范围为 1 ~ 12 轮，给的是 %d", *p.PurgeFailRounds)
 		}
 		next.Sources.PurgeFailRounds = *p.PurgeFailRounds
+	}
+	if p.MaxNodes != nil {
+		// 0 是显式选择「不限」，所以只拒负数和离谱值。
+		if *p.MaxNodes < 0 || *p.MaxNodes > 100000 {
+			return a.cfg, fmt.Errorf("池子容量上限范围为 0（不限）~ 100000，给的是 %d", *p.MaxNodes)
+		}
+		next.Sources.MaxNodes = *p.MaxNodes
 	}
 
 	// 2. 可用性探查
@@ -122,10 +124,10 @@ func (a *App) PatchConfig(p ConfigPatch) (config.Config, error) {
 		next.Purity.RequestsPerMinute = *rpm
 	}
 
-	// 三个来源一个都不剩就是脚枪。界面上只给两个开关，所以这条现在只在
-	// 「配置文件里把主站也关了」时才会碰到。
-	if !next.Sources.Vpngate.Enabled && !next.Sources.Mirrors.Enabled && !next.Sources.CDN.Enabled {
-		return a.cfg, errors.New("三个来源不能全关掉：那样池子里只剩历史数据，再也拉不到新节点")
+	// 两个来源一个都不剩就是脚枪。界面上只给一个开关（官方主站不让关），
+	// 所以这条现在只在「配置文件里把主站也关了」时才会碰到。
+	if !next.Sources.Vpngate.Enabled && !next.Sources.Mirrors.Enabled {
+		return a.cfg, errors.New("官方主站和镜像站不能全关掉：那样池子里只剩历史数据，再也拉不到新节点")
 	}
 	if err := next.Validate(); err != nil {
 		return a.cfg, fmt.Errorf("参数不合法: %w", err)
@@ -134,6 +136,18 @@ func (a *App) PatchConfig(p ConfigPatch) (config.Config, error) {
 		return a.cfg, fmt.Errorf("写配置文件失败: %w", err)
 	}
 	a.cfg = next
+
+	// 上限改小了：当场裁一次，界面马上能看到池子变小，不用等下一轮刷新。
+	// 这里用 next 而不是 Config()： cfgMu 正持着，再进 Config() 就是自己等自己。
+	if p.MaxNodes != nil {
+		if n := a.trimTo(store.EvictionFrom(next.Sources)); n > 0 {
+			a.log.Printf("[app] 容量上限改成 %d，裁掉 %d 个节点", next.Sources.MaxNodes, n)
+			// 当场写盘：界面上已经少了 N 个，重启后又涨回来会让人以为没保存。
+			if err := a.SaveState(); err != nil {
+				a.log.Printf("[app] 容量裁剪后保存失败: %v", err)
+			}
+		}
+	}
 
 	// 纯净度限流变动即时生效
 	if rpm != nil && a.purity != nil {

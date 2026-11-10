@@ -369,8 +369,8 @@ func timeU(t time.Time) int64 {
 //   - 可达性 40：稳定 40 / 可达 32 / 未知 18 / 抖动 12 / 未测 10 / 挂了 4
 //   - 延迟 30：≤80ms 30，≤150 26，≤300 20，≤600 12，>600 4，没数据 8
 //   - 纯净度 30：score×0.3，没测过给 12（中性，不奖不罚）
-//   - 加分：志愿者家宽 +8、Cloudflare 也观测到可达 +4
-//   - 减分：VPN Gate 自营机房 −6、Cloudflare 观测不可达 −6、
+//   - 加分：志愿者家宽 +8、Cloudflare 也观测到可达 +4（一周内的观测才算）
+//   - 减分：VPN Gate 自营机房 −6、Cloudflare 观测不可达 −6（同上，一周内才算）、
 //     超过 48 小时没被官方名单见过 −4
 func RecommendScore(n *model.Node, pingSrc string) float64 {
 	var sc float64
@@ -410,7 +410,10 @@ func RecommendScore(n *model.Node, pingSrc string) float64 {
 	if n.Residential != nil && *n.Residential {
 		sc += 8
 	}
-	if n.CFProbe != nil {
+	// Cloudflare 观测来自已移除的第三方源，现在只读不写：只在一周内参与加减分。
+	// 过期的观测留在盘上仅供查看，不能继续影响排名 —— 否则一个早已修好的节点
+	// 会被一条半年前的结论按住。
+	if cfFresh(n, time.Now().UTC()) {
 		switch n.CFProbe.Status {
 		case "reachable":
 			sc += 4
@@ -431,4 +434,16 @@ func RecommendScore(n *model.Node, pingSrc string) float64 {
 		sc = 100
 	}
 	return sc
+}
+
+// cfProbeDays 是第三方 Cloudflare 观测的保质期（天）。
+const cfProbeDays = 7
+
+// cfFresh 判断这份 Cloudflare 观测还在不在有效期内。前端用同名的规则标灰，
+// 两边口径要一致。
+func cfFresh(n *model.Node, now time.Time) bool {
+	if n == nil || n.CFProbe == nil || n.CFProbe.CheckedAt.IsZero() {
+		return false
+	}
+	return now.Sub(n.CFProbe.CheckedAt) <= cfProbeDays*24*time.Hour
 }

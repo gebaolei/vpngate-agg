@@ -18,7 +18,6 @@ import (
 const (
 	DefaultAPI       = "https://www.vpngate.net/api/iphone/"
 	DefaultSitesPage = "https://www.vpngate.net/en/sites.aspx"
-	DefaultRepo      = "GeorgeXie2333/vpngate-list-mirror"
 )
 
 // Config 是全部可调参数。
@@ -73,16 +72,21 @@ type APIConfig struct {
 	RatePerMinute int `json:"rate_per_minute"`
 }
 
-// SourcesConfig 管三个来源：官方 API、官方镜像站、vpngate-list-mirror 兜底。
+// SourcesConfig 管两个来源：官方主站 API、官方镜像站。
 type SourcesConfig struct {
 	RefreshIntervalMinutes int `json:"refresh_interval_minutes"`
-	KeepDays               int `json:"keep_days"` // 节点在池里保留多少天（对齐 mirror 的 7 天）
-	// 提前淘汰，对齐 vpngate-list-mirror 滚动池的规则：本轮名单里没见到的 TCP 节点，
+	KeepDays               int `json:"keep_days"` // 节点在池里保留多少天
+	// 提前淘汰：本轮名单里没见到的 TCP 节点，
 	// 缺席满 PurgeAbsentHours 且连续 PurgeFailRounds 轮有效探测明确失败就删掉。
 	// 「有效」指拿到了确定结论 —— 超时、UDP 无回包、本轮没测到都不算失败。
 	// PurgeAbsentHours 设 0 表示不提前淘汰，只按 KeepDays 过期。
 	PurgeAbsentHours int `json:"purge_absent_hours"`
 	PurgeFailRounds  int `json:"purge_fail_rounds"`
+	// MaxNodes 是节点池的容量上限：每轮刷新并入后、以及启动时，超出来的部分会被
+	// 容量裁剪请出去（硬伤的先生，再按推荐分从低到高）。0 = 不限。
+	// 要有上限的理由：探测一轮、写盘、拉纯净度都随池子线性变贵，
+	// 而官方 + 镜像一轮就能给到几千个。
+	MaxNodes int `json:"max_nodes"`
 	// KeepVpngateOwn 保留 VPN Gate 自营机房节点（hostname public-vpn-*、网段
 	// 219.100.37.0/24）。默认 false：那是 SoftEther 官方放在筑波大学学术网里的
 	// 机器，本质是机房出口，官方分数再高也不是家宽；要「全局出口稳、别掉线」的
@@ -90,11 +94,7 @@ type SourcesConfig struct {
 	KeepVpngateOwn bool          `json:"keep_vpngate_own"`
 	Vpngate        VpngateSource `json:"vpngate"`
 	Mirrors        MirrorSource  `json:"mirrors"`
-	// CDN 是同类项目 vpngate-list-mirror 发布的名单，不是官方数据。
-	// 默认只当兜底源：国内网络下官方主站和镜像站常常都不通，而 GitHub / jsDelivr
-	// 往往能通，所以界面上可以手动打开，但不默认吃它的数据。
-	CDN       CDNSource `json:"cdn"`
-	UserAgent string    `json:"user_agent,omitempty"`
+	UserAgent      string        `json:"user_agent,omitempty"`
 }
 
 // VpngateSource 是官方主站。
@@ -114,19 +114,6 @@ type MirrorSource struct {
 	ListMaxHours   int    `json:"list_max_hours"` // 镜像列表页缓存时长
 	TimeoutSeconds int    `json:"timeout_seconds"`
 	MinNodes       int    `json:"min_nodes"`
-}
-
-// CDNSource 是 vpngate-list-mirror（GitHub + jsDelivr）镜像。
-type CDNSource struct {
-	Enabled         bool   `json:"enabled"`
-	Repo            string `json:"repo"`
-	IndexURL        string `json:"index_url"` // latest.json，只在 Raw 上取（索引必须是权威可变文档）
-	CDNBase         string `json:"cdn_base"`  // {base}{commit}/{path}
-	FallbackRaw     bool   `json:"fallback_raw"`
-	UsePool         bool   `json:"use_pool"` // 读累积池 pool/servers.json（节点多得多，还带 Cloudflare TCP 观测）
-	PoolMaxAgeHours int    `json:"pool_max_age_hours"`
-	MaxNodes        int    `json:"max_nodes"` // 从 CDN 导入的节点上限，控住一轮探测的规模
-	TimeoutSeconds  int    `json:"timeout_seconds"`
 }
 
 // ProbeConfig 是节点测试参数。
@@ -187,6 +174,7 @@ func Default() Config {
 			KeepDays:               7,
 			PurgeAbsentHours:       24,
 			PurgeFailRounds:        3,
+			MaxNodes:               1500,
 			Vpngate: VpngateSource{
 				Enabled:        true,
 				TimeoutSeconds: 35,
@@ -195,21 +183,10 @@ func Default() Config {
 			}, Mirrors: MirrorSource{
 				Enabled:        true,
 				SitesPage:      DefaultSitesPage,
-				MaxMirrors:     0, // 0 = 每轮全抓：少了 CDN 兜底后，节点量全靠这几个镜像抹开
+				MaxMirrors:     0, // 0 = 每轮全抓：节点量全靠这几个镜像抹开
 				ListMaxHours:   12,
 				TimeoutSeconds: 30,
 				MinNodes:       20,
-			},
-			CDN: CDNSource{
-				Enabled:         false, // 同类项目发布的非官方名单，默认只当兜底，界面上可以打开
-				Repo:            DefaultRepo,
-				IndexURL:        defaultIndexURL(DefaultRepo),
-				CDNBase:         defaultCDNBase(DefaultRepo),
-				FallbackRaw:     true,
-				UsePool:         true,
-				PoolMaxAgeHours: 72,
-				MaxNodes:        1500,
-				TimeoutSeconds:  60,
 			},
 			UserAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
 		},
@@ -339,11 +316,11 @@ func applyEnv(c *Config) {
 	setInt("VPNGATE_AGG_API_MAX_NODES", &c.API.MaxNodes)
 	setInt("VPNGATE_AGG_API_RATE_PER_MIN", &c.API.RatePerMinute)
 	setInt("VPNGATE_AGG_REFRESH_MINUTES", &c.Sources.RefreshIntervalMinutes)
+	// 池子容量上限：0 = 不限。用同一个变量名是为了跟界面里的 max_nodes 对得上。
+	setInt("VPNGATE_AGG_MAX_NODES", &c.Sources.MaxNodes)
 	setInt("VPNGATE_AGG_PROBE_INTERVAL", &c.Probe.IntervalMinutes)
 	setInt("VPNGATE_AGG_PROBE_CONCURRENCY", &c.Probe.Concurrency)
 	setBool("VPNGATE_AGG_PROBE_ENABLED", &c.Probe.Enabled)
-	setBool("VPNGATE_AGG_CDN_ENABLED", &c.Sources.CDN.Enabled)
-	setBool("VPNGATE_AGG_CDN_POOL", &c.Sources.CDN.UsePool)
 	setBool("VPNGATE_AGG_KEEP_VPNGATE_OWN", &c.Sources.KeepVpngateOwn)
 	setInt("VPNGATE_AGG_PURITY_RPM", &c.Purity.RequestsPerMinute)
 	setBool("VPNGATE_AGG_PURITY_ENABLED", &c.Purity.Enabled)
@@ -366,17 +343,6 @@ func applyEnv(c *Config) {
 			c.Purity.Keys[name] = v
 		}
 	}
-}
-
-// defaultIndexURL / defaultCDNBase 是某个仓库对应的默认地址。
-// 单独抽出来是为了让 Validate 能认出「这一项还是默认串」，
-// 从而在用户只改了 repo 时把两项一起换掉。
-func defaultIndexURL(repo string) string {
-	return "https://raw.githubusercontent.com/" + repo + "/main/latest.json"
-}
-
-func defaultCDNBase(repo string) string {
-	return "https://cdn.jsdelivr.net/gh/" + repo + "@"
 }
 
 // Validate 兜底数值、拒绝明显不成立的组合。
@@ -443,25 +409,13 @@ func (c *Config) Validate() error {
 	if c.Sources.Mirrors.MaxMirrors < 0 {
 		c.Sources.Mirrors.MaxMirrors = 0
 	}
-	if c.Sources.CDN.Enabled {
-		if c.Sources.CDN.Repo == "" {
-			c.Sources.CDN.Repo = DefaultRepo
-		}
-		repo := c.Sources.CDN.Repo
-		// 只改 repo 时，索引与 CDN base 要跟着走：这两项是从 Default() 带过来的
-		// 默认串，不跟着改就会静默继续抓默认仓库，用户改了 repo 却没生效。
-		if c.Sources.CDN.IndexURL == "" || c.Sources.CDN.IndexURL == defaultIndexURL(DefaultRepo) {
-			c.Sources.CDN.IndexURL = defaultIndexURL(repo)
-		}
-		if c.Sources.CDN.CDNBase == "" || c.Sources.CDN.CDNBase == defaultCDNBase(DefaultRepo) {
-			c.Sources.CDN.CDNBase = defaultCDNBase(repo)
-		}
-		if !strings.Contains(c.Sources.CDN.CDNBase, "%s") && !strings.HasSuffix(c.Sources.CDN.CDNBase, "@") {
-			return fmt.Errorf("sources.cdn.cdn_base 必须以 @ 结尾（后面拼 commit SHA）: %q", c.Sources.CDN.CDNBase)
-		}
-		if c.Sources.CDN.MaxNodes == 0 {
-			c.Sources.CDN.MaxNodes = 1500
-		}
+	// max_nodes：0 = 不限（默认）。负数是配置写错；十万这个上限是为了拦住
+	// 「多打几个 0」——真按十万节点跑一轮探测就是几个小时，不如拒掉。
+	if c.Sources.MaxNodes < 0 {
+		return fmt.Errorf("sources.max_nodes 不能是负数（0 = 不限），给的是 %d", c.Sources.MaxNodes)
+	}
+	if c.Sources.MaxNodes > 100000 {
+		c.Sources.MaxNodes = 100000
 	}
 	if c.Probe.Enabled {
 		if c.Probe.IntervalMinutes <= 0 {
