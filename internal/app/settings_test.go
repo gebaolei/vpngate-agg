@@ -2,6 +2,9 @@ package app
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -268,12 +271,17 @@ func TestPatchConfigTrimsOnCapacityChange(t *testing.T) {
 }
 
 // 上限是在程序停着的时候改的（旧版本攒下的池子已经涨过上限）：常驻启动就得先裁一次，
+// 上限是在程序停着的时候改的（旧版本攒下的池子已经涨过上限）：常驻启动就得先裁一次，
 // 否则第一轮探测要按超标的池子排班。
+//
+// 探测和纯净度在这里全关掉：Run 的启动序列会顺手跑一轮，测试不该在临时目录里
+// 留下没人等的写入（t.TempDir 的清理会撞上它，CI 上就是 directory not empty）。
 func TestRunTrimsOverCapacityPool(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.Default()
 	cfg.DataDir = dir
 	cfg.Probe.Enabled = false
+	cfg.Purity.Enabled = false
 	cfg.Sources.MaxNodes = 0 // 旧版本没这个概念：先把池子攒起来
 	a, err := New(cfg, discardLogger())
 	if err != nil {
@@ -304,26 +312,46 @@ func TestRunTrimsOverCapacityPool(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go b.Run(ctx)
+	done := make(chan struct{})
+	go func() {
+		b.Run(ctx)
+		close(done)
+	}()
 	waitForCount(t, b, 2)
-	cancel()
-
 	// 裁过要落盘：否则每次启动都重裁一遍，日志里永远是同一句。
+	// 直接读快照而不是再开一个 App：多开一处写入就多一处跟临时目录清理打架的地方。
+	waitForPoolNodes(t, dir, 2)
+	cancel()
+	<-done // Run 退出前还会尽力落一次盘，等它写完再让临时目录收尾
+
+	cfg.Sources.MaxNodes = 0
+	c, err := New(cfg, discardLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Store().Count(); got != 2 {
+		t.Errorf("重读磁盘后池子 = %d，期望那次裁剪已经落盘", got)
+	}
+}
+
+// waitForPoolNodes 等磁盘上的快照里节点数变成 want。写盘是 tmp + rename，
+// 所以能读到就是写完了。
+func waitForPoolNodes(t *testing.T, dir string, want int) {
+	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		cfg.Sources.MaxNodes = 0
-		c, err := New(cfg, discardLogger())
-		if err != nil {
-			t.Fatal(err)
-		}
-		got := c.Store().Count()
-		if got == 2 {
-			break
+		if blob, err := os.ReadFile(filepath.Join(dir, "pool.json")); err == nil {
+			var doc struct {
+				Nodes map[string]json.RawMessage `json:"nodes"`
+			}
+			if err := json.Unmarshal(blob, &doc); err == nil && len(doc.Nodes) == want {
+				return
+			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("启动裁剪没落盘：重开读到的还是 %d", got)
+			t.Fatalf("等磁盘上的池子变成 %d 超时", want)
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
