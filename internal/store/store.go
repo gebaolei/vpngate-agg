@@ -140,8 +140,8 @@ func (s *Store) Dir() string { return s.dir }
 //   - AbsentFor + FailRounds：TCP 节点缺席满 AbsentFor、且已经连续 FailRounds 轮
 //     有效探测明确失败，就提前删（mirror 对「明显已经不行的 TCP 节点」的清理）。
 //
-// FailRounds 只数「有效轮」：拿到了确定结论才算。超时和 UDP 无回包不算失败，
-// 否则半池 UDP 节点会被误杀。
+// FailRounds 只数「有效轮」：拿到了确定结论才算（refused / unreachable /
+// blocked / TCP 超时）。UDP 无回包不算失败，否则半池 UDP 节点会被误杀。
 type Eviction struct {
 	KeepDays   int
 	AbsentFor  time.Duration
@@ -413,8 +413,8 @@ func badTypeForTrim(n *model.Node, ev Eviction) bool {
 // 「连续三轮有效探测失败」。判定只看每个节点本轮最新那条样本：
 //
 //   - 连上了 → 清零
-//   - 明确否定（refused / unreachable / blocked）→ 加一
-//   - 超时、UDP 无回包这种说不清 → 不动（既不算失败，也不把已有的连击抹掉）
+//   - 明确否定（refused / unreachable / blocked / TCP 超时）→ 加一
+//   - UDP 无回包、探测被取消这种说不清 → 不动（既不算失败，也不把已有的连击抹掉）
 //   - 本轮没测到 → 不动
 //
 // counting=false 用于补测轮：同一轮里再数一次会把删除提前一倍。
@@ -435,8 +435,7 @@ func (s *Store) UpdateFailRounds(roundStart time.Time, counting bool) {
 		switch {
 		case last.OK:
 			n.DownRounds = 0
-		case last.Service == model.ServiceRefused || last.Service == model.ServiceUnreachable ||
-			last.Service == model.ServiceBlocked:
+		case model.NegativeVerdict(last):
 			n.DownRounds++
 		}
 	}
@@ -525,7 +524,10 @@ func (s *Store) SetResidential(id string, residential bool) bool {
 
 // sampleOf 把完整结果压成历史样本。
 func sampleOf(r *model.ProbeResult) model.ProbeSample {
-	return model.ProbeSample{At: r.At, OK: r.OK, RTTMS: r.RTTMS, Service: r.Service, Reason: r.Reason}
+	return model.ProbeSample{
+		At: r.At, OK: r.OK, RTTMS: r.RTTMS, Service: r.Service, Reason: r.Reason,
+		Proto: r.Proto, Cancelled: r.Cancelled,
+	}
 }
 
 // Save 原子写快照。调用方（定时器和手动操作）负责控制频率。

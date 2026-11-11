@@ -85,9 +85,16 @@ type Target struct {
 // 「我看到了什么」，并把「不确定」如实标成 unknown。
 func (p *Prober) Probe(ctx context.Context, t Target) *model.ProbeResult {
 	host, port, proto := t.Host, t.Port, t.Proto
-	res := &model.ProbeResult{At: time.Now().UTC(), Host: host, Port: port, Proto: proto, Service: model.ServiceUnknown}
+	res := &model.ProbeResult{At: time.Now().UTC(), Host: host, Port: port, Proto: proto, Service: model.ServiceUnknown, Handshake: p.opt.Handshake}
 	t0 := time.Now()
-	defer func() { res.DurationMS = time.Since(t0).Milliseconds() }()
+	defer func() {
+		res.DurationMS = time.Since(t0).Milliseconds()
+		// 轮次被取消/进程收尾：这一条不是节点的结论，不能计入连负轮数。
+		// 自己那道 dial 超时是子 ctx 到期，不会让父 ctx 报错，所以这里不会误标。
+		if ctx.Err() != nil {
+			res.Cancelled = true
+		}
+	}()
 
 	if port <= 0 || port > 65535 {
 		res.Service = model.ServiceBlocked
@@ -315,6 +322,8 @@ func stripTCPFrame(b []byte) []byte {
 // 家宽 NAT 也常把陌生源的 UDP 直接丢掉。所以这里返回 no-reply，
 // 由 ComputeHealth 归到 unknown，而不是 down。
 func (p *Prober) probeUDP(ctx context.Context, addr string, res *model.ProbeResult) {
+	// UDP 没有“先握手再探服务”的分层：发硬重置包本身就是它的全部探测。
+	res.Handshake = true
 	conn, err := p.dialUDP(ctx, addr, p.opt.TCPTimeout)
 	if err != nil {
 		// UDP「连接」是纯本地操作，出错基本是地址/网络层问题。

@@ -10,12 +10,12 @@ import (
 //
 // 「可达 / 不可达 / 未知」必须分开，这是整个工具的判断基准：
 //   - 连上并（可选）拿到服务回包 → 可达
-//   - 明确收到 RST（refused）或网络层不可达 → 不可达
-//   - 超时、UDP 无回包 → 未知
+//   - 明确收到 RST（refused）、网络层不可达、或 TCP 握手超时 → 不可达
+//   - UDP 无回包、探测被取消 → 未知
 //
-// 超时不能算死亡：跨境链路上丢一个 SYN 太常见，把「我们这边看不到」写成
-// 「节点死了」会让界面上一轮刷新就杀掉一半节点。实测 UDP 节点对硬重置包
-// 基本不响应（SoftEther 的行为），它们会长期落在未知，这是设计如此。
+// TCP 超时算不可达是有意改的：tcp_timeout_seconds 就是「能不能用」的门槛，
+// 在门槛内连不上的端口就是不可用，挂成「说不清」只会让它在池子里白躺一周。
+// UDP 仍不算失败：SoftEther 对硬重置包基本静默，拿它判死会误杀一大片。
 func ComputeHealth(samples []model.ProbeSample, keep int) model.ProbeHealth {
 	if keep > 0 && len(samples) > keep {
 		samples = samples[len(samples)-keep:]
@@ -64,12 +64,11 @@ func ComputeHealth(samples []model.ProbeSample, keep int) model.ProbeHealth {
 	case last.OK:
 		t := true
 		h.Alive = &t
-	case last.Service == model.ServiceRefused || last.Service == model.ServiceUnreachable ||
-		last.Service == model.ServiceBlocked:
+	case model.NegativeVerdict(last):
 		f := false
 		h.Alive = &f
 	default:
-		// timeout / no-reply / 认不出的失败：结论未知
+		// UDP 无回包、被取消、缺 proto 的老样本、认不出的失败：结论未知
 		h.Alive = nil
 	}
 	// 置信度：证据数量 × 新鲜度。界面用它决定要不要把结论显示成「已确认」。

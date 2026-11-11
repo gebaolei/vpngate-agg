@@ -140,7 +140,8 @@
             <option value="tcp">TCP</option><option value="udp">UDP</option>
           </select>
         </label>
-        <label class="mini">状态
+        <label class="mini" title="档位来自本机探测。TCP 握手超时算「不可达」（在 tcp_timeout_seconds 内连不上就是不可用，不再挂在未知）；UDP 不回包只算未知，因为 SoftEther 对硬重置包本来就静默。">
+          状态
           <select id="f-level" multiple size="1">
             <option value="stable">稳定</option>
             <option value="reachable">可达</option>
@@ -165,7 +166,7 @@
           </select>
         </label>
         <button class="btn btn-icon" id="f-dir" data-dir="asc" title="切换升/降序">↑</button>
-        <label class="mini" title="默认只看本机实测：没测过的写「待测试」，测了但没连上写「未测出延迟」。官方 Ping 和 Cloudflare 观测要显式选才用（它们不代表你这张网）；Cloudflare 观测来自已移除的第三方源，只当历史参考。">
+        <label class="mini" title="默认只看本机实测：没测过的写「待测试」，测了但拿不出延迟的写「未测出延迟」（主要是 UDP 无回包）。TCP 握手超时已经是不可达，写「超时不可达」并且不给延迟数。官方 Ping 和 Cloudflare 观测要显式选才用（它们不代表你这张网）；Cloudflare 观测来自已移除的第三方源，只当历史参考。">
           延迟口径
           <select id="f-ping-src">
             <option value="best">本机实测（EWMA）</option>
@@ -198,7 +199,7 @@
             <th data-sort="purity">纯净度</th>
             <th>国家</th>
             <th>端点</th>
-            <th data-sort="ping" title="只看本机实测。没测过→待测试；测了没连上→未测出延迟；已判定不可达→不给延迟数也不参与这一列的排序">延迟</th>
+            <th data-sort="ping" title="只看本机实测。没测过→待测试；UDP 无回包→未测出延迟；不可达（含 TCP 握手超时）→不给延迟数也不参与这一列的排序">延迟</th>
             <th data-sort="score">官方分</th>
             <th data-sort="speed">速度</th>
             <th data-sort="sessions">会话</th>

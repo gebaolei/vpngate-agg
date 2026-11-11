@@ -119,10 +119,10 @@ func RunRound(ctx context.Context, prober *Prober, targets []Target, opt RoundOp
 		job.Done++
 		if res.OK {
 			job.OK++
-		} else if res.Service == model.ServiceRefused || res.Service == model.ServiceUnreachable {
+		} else if model.NegativeResult(*res) {
 			job.Failed++
 		} else {
-			// 超时与无响应不算失败，算「不确定」，单独计数免得把 ETA 算歪。
+			// UDP 无回包、被取消这类「说不清」不算失败，单独计数免得把 ETA 算歪。
 			job.Skipped++
 		}
 		job.LastNode = res.Host

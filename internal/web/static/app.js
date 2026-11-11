@@ -993,8 +993,10 @@ function pingClass(ms) {
 // 显示与排序必须用同一个值，不然是「列上写着待测试，却按官方 44ms 排在前面」。
 //
 // 已判定不可达的节点任何口径都不给延迟数：EWMA 只由成功的探测喂出来，不清空也
-// 不按时间衰减（见 store/health.go），旧数字挂在「已挂」的行上会被读成「现在还能
+// 不按时间衰减（见 store/health.go），旧数字挂在「不可达」的行上会被读成「现在还能
 // 连，只是慢」。历史值在 title 和详情面板里；后端的 sort=ping / max_ping 同口径不参与。
+// TCP 握手超时也是不可达（tcp_timeout_seconds 就是可用门槛），但文案单独写：
+// 「端口拒接」和「连不到 5 秒」对排查是两回事。
 function pickPing(n) {
   const health = n.health || {};
   const level = health.level || healthLevel(health);
@@ -1002,7 +1004,8 @@ function pickPing(n) {
   const lastOK = health.last_ok || '';
   if (level === 'down') {
     const stale = ewma || (n.probe && n.probe.ok ? n.probe.rtt_ms : 0);
-    return { v: 0, src: '', note: '已判定不可达', stale: stale, lastOK: lastOK };
+    const timedOut = !!(n.probe && !n.probe.ok && n.probe.service === 'timeout');
+    return { v: 0, src: '', note: timedOut ? '超时不可达' : '已判定不可达', stale: stale, lastOK: lastOK };
   }
   if (state.pingSource === 'upstream') {
     const v = n.upstream_ping_ms || 0;
@@ -1026,7 +1029,9 @@ function pickPing(n) {
 }
 
 // 没有实测延迟时得说清是哪种“没有”：还没测过（待测试）与测了但没连上
-// （未测出延迟）是两个完全不同的结论。
+// （未测出延迟）是两个完全不同的结论。TCP 超时走不到这里 —— 它已经是不可达，
+// 在上面的 down 分支里单独写了；还能落到这里的只剩 UDP 无回包、被取消、
+// 以及老快照里没存 proto 的超时样本。
 function noteWhenUnmeasured(health) {
   return (health.tests || 0) > 0 ? '未测出延迟' : '待测试';
 }
@@ -1109,10 +1114,13 @@ function rowFor(n) {
   ]);
   if (ping.note) {
     const off = el('small', { class: 'ping-off', text: ping.note });
-    if (ping.note === '已判定不可达') {
+    if (ping.note === '已判定不可达' || ping.note === '超时不可达') {
+      const why = ping.note === '超时不可达'
+        ? 'TCP 握手超时：在 probe.tcp_timeout_seconds（默认 5 秒）里完不成三次握手 —— 连不上就是不可用，不再当「说不清」挂着'
+        : '已判定不可达（端口拒接 / 网络不可达）';
       off.title = ping.stale
-        ? `历史实测 ${fmtMs(ping.stale)}（最近成功 ${hasTime(ping.lastOK) ? fmtRel(ping.lastOK) : '无记录'}）。已判定不可达，列表不再给延迟数，延迟排序/筛选也不把它算进去；完整历史在详情里。`
-        : '已判定不可达，没有可引用的延迟数。';
+        ? `历史实测 ${fmtMs(ping.stale)}（最近成功 ${hasTime(ping.lastOK) ? fmtRel(ping.lastOK) : '无记录'}）。${why}，列表不再给延迟数，延迟排序/筛选也不把它算进去；完整历史在详情里。`
+        : `${why}，没有可引用的延迟数。`;
     } else if (ping.note === '待测试') {
       off.title = '本机还没测过这个节点。官方 Ping 不参与这一列（要看它就切延迟口径）。';
     } else if (ping.note === '未测出延迟') {
@@ -1704,7 +1712,7 @@ function settingsProbe(s) {
   settingNumber(sec, '探测间隔', `一轮后再隔 ${p.unknown_retry_minutes || 60} 分钟补测「说不清」的 TCP 节点`, p.interval_minutes, 'probe_interval_minutes', { min: 5, max: 1440, unit: '分钟' });
   settingNumber(sec, '探测并发', '同时拨出去的节点数', p.concurrency, 'probe_concurrency', { min: 1, max: 512, unit: '个' });
   settingsGroupLabel(sec, '超时');
-  settingNumber(sec, 'TCP 超时', 'TCP 连接等待上限', p.tcp_timeout_seconds, 'probe_tcp_timeout_seconds', { min: 1, max: 30, unit: '秒' });
+  settingNumber(sec, 'TCP 超时', 'TCP 连接等待上限：到点还连不上就判不可达（不再挂未知），也计入淘汰的连负轮数', p.tcp_timeout_seconds, 'probe_tcp_timeout_seconds', { min: 1, max: 30, unit: '秒' });
   settingNumber(sec, 'UDP 超时', 'UDP 不回包算「说不清」，不算挂了', p.udp_timeout_seconds, 'probe_udp_timeout_seconds', { min: 1, max: 30, unit: '秒' });
   settingToggle(sec, 'OpenVPN 握手', '发 P_CONTROL_HARD_RESET 认服务指纹', p.handshake, 'probe_handshake');
   return sec;

@@ -15,7 +15,7 @@
   "sources": {
     "_comment": "只拉官方：主站 API + sites.aspx 上列出的全部镜像站（按 /24 去重后每轮全抓，max_mirrors=0 就是「全抓」）。第三方名单（vpngate-list-mirror）已整段移除：节点量不再由第三方项目决定；老配置里残留的 cdn 段会被忽略。",
     "_ui": "源开关、保留机房节点、keep_days、purge_fail_rounds、max_nodes、探测开关/间隔/并发/两个超时、纯净度开关与每分钟限流，在界面设置页也能改（节点配置 / 可用性探查 / IP 纯净度检查 三块）；其余只在这里改，改完重启。",
-    "_purge": "淘汰规则：本轮名单里没有的节点先留 keep_days 天；TCP 节点缺席满 purge_absent_hours，且连续 purge_fail_rounds 轮明确失败（refused / unreachable / blocked）就提前剔除。超时和不回包不算明确失败，UDP 也不提前剔除（它本来就不回包）。",
+    "_purge": "淘汰规则：本轮名单里没有的节点先留 keep_days 天；TCP 节点缺席满 purge_absent_hours，且连续 purge_fail_rounds 轮明确失败（refused / unreachable / blocked / TCP 超时）就提前剔除。TCP 握手超时算明确失败 —— tcp_timeout_seconds 就是「能不能用」的门槛；UDP 不回包不算（它本来就不回包），也不提前剔除。",
     "_capacity": "max_nodes 是池子的容量上限：每轮刷新并入后、启动时、界面上改上限时，超出来的部分会被请出去 —— 先走硬伤的（已判定不可达、纯净度说是机房/代理/Tor、本轮名单里没有、从没测过的空壳），还超就按推荐分从低到高删。0 = 不限。",
     "refresh_interval_minutes": 60,
     "keep_days": 7,
@@ -42,7 +42,7 @@
     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
   },
   "probe": {
-    "_comment": "默认每 6 小时测完整个池子（selection=all，不是只测本轮新名单）；一轮跑完再隔 unknown_retry_minutes 分钟补测一轮「说不清」的 TCP 节点，补测轮不计入淘汰用的连负轮数。",
+    "_comment": "默认每 6 小时测完整个池子（selection=all，不是只测本轮新名单）；一轮跑完再隔 unknown_retry_minutes 分钟补测一轮「说不清」的 TCP 节点，补测轮不计入淘汰用的连负轮数。tcp_timeout_seconds 也是可用性门槛：到点连不上就判不可达（level=down）并计入淘汰。",
     "enabled": true,
     "interval_minutes": 360,
     "concurrency": 64,

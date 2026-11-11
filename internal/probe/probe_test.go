@@ -310,9 +310,10 @@ func TestRunRoundCountsAndBatches(t *testing.T) {
 		t.Errorf("status = %s，期望 done", job.Status)
 	}
 	// 回环地址会被地址策略先拦掉（探测不该对着自己打），所以三个目标都落在
-	// blocked：不算可达也不算失败，进「不确定」计数。
-	if job.OK != 0 || job.Failed != 0 || job.Skipped != 3 {
-		t.Errorf("期望 ok=0 / failed=0 / skipped=3，实得 %d / %d / %d", job.OK, job.Failed, job.Skipped)
+	// blocked：那是「根本不该打出去」的明确否定（与 UpdateFailRounds 同一口径），
+	// 计失败而不是计不确定。
+	if job.OK != 0 || job.Failed != 3 || job.Skipped != 0 {
+		t.Errorf("期望 ok=0 / failed=3 / skipped=0，实得 %d / %d / %d", job.OK, job.Failed, job.Skipped)
 	}
 	seen := map[string]bool{}
 	for _, m := range applied {
@@ -354,6 +355,42 @@ func TestRunRoundEmptyAndCancel(t *testing.T) {
 	}
 	if job.Done >= job.Total {
 		t.Errorf("取消后不该把 %d 个目标全测完，实得 done=%d", job.Total, job.Done)
+	}
+}
+
+// TCP 握手超时是「明确否定」（连不上就是不可用），被取消的探测不是结论。
+// 判定靠 service + proto + cancelled 三个字段，它们必须从探测器里就带对：
+// UDP 的超时不能判死，靠的就是 proto；轮次被中断不能进淘汰计数，靠的是 cancelled。
+func TestProbeTimeoutIsNegativeButCancelIsNot(t *testing.T) {
+	p := New(fastOptions())
+	p.dialTCP = func(_ context.Context, _ string, _ time.Duration) (net.Conn, error) {
+		return nil, context.DeadlineExceeded
+	}
+	res := p.Probe(context.Background(), Target{ID: "v1:t", Host: "8.8.8.8", Port: 995, Proto: "tcp"})
+	if res.OK || res.Service != model.ServiceTimeout {
+		t.Errorf("ok=%v service=%s，期望 false/timeout", res.OK, res.Service)
+	}
+	if res.Proto != "tcp" {
+		t.Errorf("proto = %q，必须带出去：UDP 的超时不判死就靠这个字段", res.Proto)
+	}
+	if !model.NegativeResult(*res) {
+		t.Error("TCP 握手超时应算明确否定（不可达）")
+	}
+	if !res.Handshake {
+		t.Error("handshake=true 时结果里该记上做了硬重置探测，界面才能说明白")
+	}
+
+	cctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	p.dialTCP = func(_ context.Context, _ string, _ time.Duration) (net.Conn, error) {
+		return nil, context.Canceled
+	}
+	res = p.Probe(cctx, Target{ID: "v1:c", Host: "8.8.8.8", Port: 995, Proto: "tcp"})
+	if !res.Cancelled {
+		t.Error("被取消的探测必须标 cancelled：它不是节点的结论")
+	}
+	if model.NegativeResult(*res) {
+		t.Error("被取消的探测不该算明确否定")
 	}
 }
 

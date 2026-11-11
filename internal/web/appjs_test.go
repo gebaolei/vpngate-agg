@@ -154,7 +154,7 @@ func TestAppJSMarksStaleCFProbe(t *testing.T) {
 // 旧数字会被读成「现在还能连，只是慢」），改为只写说明 + 把历史值放到 title
 // 和详情面板里。这个规则全在前端，写错了不会报错，只会静默把作废的
 // 延迟列的四种状态必须分清楚：待测试（还没测过）/ 实测 / 未测出延迟（测了
-// 但没连上）/ 已判定不可达。同时 best 口径不能再兜底官方 Ping —— 延迟列显示
+// 但没连上）/ 已判定不可达 / 超时不可达（TCP 握手超时也算）。同时 best 口径不能再兜底官方 Ping —— 延迟列显示
 // 的数和 sort=ping / max_ping 用的数必须是同一个值。这些规则全在前端，写错了
 // 不报错，只会静默把别人那张网的数顶到这一列上，所以钉住。
 func TestAppJSHidePingForDownNodes(t *testing.T) {
@@ -164,7 +164,8 @@ func TestAppJSHidePingForDownNodes(t *testing.T) {
 	}
 	src := string(blob)
 	for _, want := range []string{
-		"note: '已判定不可达'",      // 已挂：不给延迟数
+		"'已判定不可达'",            // 端口拒接 / 网络不可达：不给延迟数
+		"timedOut ? '超时不可达'",  // TCP 握手超时走哪一边：文案得分开
 		"'待测试'",               // 从没测过
 		"'未测出延迟'",             // 测了但一次都没连上
 		"noteWhenUnmeasured(", // 上面两个是同一条函数分的

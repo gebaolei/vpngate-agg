@@ -151,12 +151,18 @@ type CFProbe struct {
 }
 
 // ProbeSample 是一次探测的紧凑记录（存历史用）。
+//
+// Proto/Cancelled 必须跟着存：判定「这次失败算不算明确否定」要看协议
+// （UDP 不回包是常态，TCP 连不上就是不可用）和是不是我们自己停的手。
 type ProbeSample struct {
 	At      time.Time `json:"at"`
 	OK      bool      `json:"ok"`
 	RTTMS   int64     `json:"rtt_ms"`
 	Service string    `json:"service,omitempty"`
 	Reason  string    `json:"reason,omitempty"` // 失败原因或 unknown 的原因
+	Proto   string    `json:"proto,omitempty"`
+	// Cancelled: 探测被上层取消（轮次中断/取消任务），不是节点的结论，不计失败。
+	Cancelled bool `json:"cancelled,omitempty"`
 }
 
 // ProbeResult 是一次探测的完整结果。
@@ -174,6 +180,8 @@ type ProbeResult struct {
 	Reason     string    `json:"reason,omitempty"` // 失败/unknown 的原因
 	Attempts   int       `json:"attempts,omitempty"`
 	DurationMS int64     `json:"duration_ms"`
+	// Cancelled 表示这一条是「探测被打断」的结果，不构成对节点的结论。
+	Cancelled bool `json:"cancelled,omitempty"`
 }
 
 // 服务指纹。判定分层是关键：TCP 能握手就代表「这个端口在你的网络里可达」，
@@ -184,7 +192,7 @@ const (
 	ServiceResponded   = "responded"   // 有回包但认不出来
 	ServiceNoReply     = "no-reply"    // 连上了但不应答（TCP）/ 无回包（UDP）
 	ServiceRefused     = "refused"     // 连接被拒绝：端口没在听
-	ServiceTimeout     = "timeout"     // TCP 握手超时
+	ServiceTimeout     = "timeout"     // TCP 握手超时：在 tcp_timeout_seconds 内完不成三次握手，按不可达处理
 	ServiceUnreachable = "unreachable" // DNS/路由/网络不可达
 	ServiceTCPOpen     = "tcp-open"    // 只做了 TCP 三次握手（配置里关掉了握手探测）
 	ServiceUnknown     = "unknown"     // 还没测过
@@ -211,13 +219,44 @@ type ProbeHealth struct {
 	Confidence float64 `json:"confidence"`
 }
 
+// NegativeVerdict 判断一次探测是不是「明确的否定结论」。
+//
+// refused / unreachable / blocked 是端口或路由层直接给了答复，无需讨论。
+// TCP 握手超时同样算否定：tcp_timeout_seconds 就是「可用」的门槛，5 秒都完不成
+// 三次握手的端口拿去用也连不上会话 —— 把它记成「说不清」只会让一个连不上的节点
+// 在池子里白躺一周，每轮还占一次探测额度。
+// UDP 的 no-reply 仍不算：SoftEther 对裸硬重置包基本静默，家宽 NAT 也常直接丢，
+// 不回包根本不是证据。被取消的探测不算：那是我们自己停的手。
+//
+// 老快照里的历史样本没有 proto 字段，超时按「说不清」处理（保守，不会追溯定罪）。
+func NegativeVerdict(s ProbeSample) bool {
+	return negativeVerdict(s.Service, s.Proto, s.Cancelled)
+}
+
+// NegativeResult 是 NegativeVerdict 对完整探测结果的版本（探测轮统计用）。
+func NegativeResult(r ProbeResult) bool {
+	return negativeVerdict(r.Service, r.Proto, r.Cancelled)
+}
+
+func negativeVerdict(service, proto string, cancelled bool) bool {
+	if cancelled {
+		return false
+	}
+	switch service {
+	case ServiceRefused, ServiceUnreachable, ServiceBlocked:
+		return true
+	case ServiceTimeout:
+		return proto == "tcp"
+	}
+	return false
+}
+
 // HealthLevel 由历史算出可直接展示的可达性档位。ComputeHealth 会顺手把结果
 // 填进 ProbeHealth.Level；单独导出是为了读到缺这个字段的老快照时也能重算。
 //
-// 「挂了」只给明确的否定结论（RST / 网络不可达 / 被本地策略拦下），
-// 而且要连续两次。超时和 UDP 无回包落在 unknown：跨境链路丢一个 SYN 太常见，
-// 而实测 SoftEther 的 UDP 监听基本不回硬重置包 —— 按失败算的话，
-// 半池子 UDP 节点会被长期误标成死亡。
+// 「挂了」只给明确的否定结论（RST / 网络不可达 / 被本地策略拦下 / TCP 握手超时），
+// 而且要连续两次。UDP 无回包仍落在 unknown：实测 SoftEther 的 UDP 监听基本不回
+// 硬重置包 —— 按失败算的话，半池子 UDP 节点会被长期误标成死亡。
 func HealthLevel(h ProbeHealth) string {
 	switch {
 	case h.Tests == 0:

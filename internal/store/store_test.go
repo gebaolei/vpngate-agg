@@ -29,26 +29,83 @@ func sample(ok bool, rtt int64, service, reason string, ago time.Duration) model
 	return model.ProbeSample{At: time.Now().UTC().Add(-ago), OK: ok, RTTMS: rtt, Service: service, Reason: reason}
 }
 
+// sampleTCP 是带 proto 的样本：TCP 超时算不算明确否定就看这个字段。
+// 不带 proto 的 sample 模拟的是升级前的老快照。
+func sampleTCP(ok bool, rtt int64, service string, ago time.Duration) model.ProbeSample {
+	s := sample(ok, rtt, service, "", ago)
+	s.Proto = "tcp"
+	return s
+}
+
 func oldestFirst(ss ...model.ProbeSample) []model.ProbeSample { return ss }
 
-// 超时与 UDP 无响应必须落在「未知」，不能算死亡：
-// 跨境链路丢一个 SYN 太常见，UDP 节点对硬重置包基本不响应（SoftEther 行为）。
+// UDP 无响应与「探测被取消」落在「未知」：SoftEther 对硬重置包基本静默，
+// 取消是我们自己停的手 —— 两者都不是节点的结论。
 func TestComputeHealthUnknownIsNotDown(t *testing.T) {
-	for _, s := range []string{model.ServiceTimeout, model.ServiceNoReply} {
-		h := ComputeHealth(oldestFirst(
-			sample(false, 0, s, "探测超时", 3*time.Hour),
-			sample(false, 0, s, "探测超时", 2*time.Hour),
-			sample(false, 0, s, "探测超时", time.Hour),
-		), 8)
-		if h.Alive != nil {
-			t.Errorf("%s 的结论应是未知，实得 Alive=%v", s, *h.Alive)
-		}
-		if model.HealthLevel(h) != "unknown" {
-			t.Errorf("%s 的档位 = %s，期望 unknown", s, model.HealthLevel(h))
-		}
-		if h.Tests != 3 || h.Successes != 0 {
-			t.Errorf("计数 = %d/%d", h.Tests, h.Successes)
-		}
+	udp := ComputeHealth(oldestFirst(
+		sample(false, 0, model.ServiceNoReply, "UDP 无响应", 3*time.Hour),
+		sample(false, 0, model.ServiceNoReply, "UDP 无响应", 2*time.Hour),
+		sample(false, 0, model.ServiceNoReply, "UDP 无响应", time.Hour),
+	), 8)
+	if udp.Alive != nil {
+		t.Errorf("UDP 无响应的结论应是未知，实得 Alive=%v", *udp.Alive)
+	}
+	if model.HealthLevel(udp) != "unknown" {
+		t.Errorf("UDP 无响应档位 = %s，期望 unknown", model.HealthLevel(udp))
+	}
+	if udp.Tests != 3 || udp.Successes != 0 {
+		t.Errorf("计数 = %d/%d", udp.Tests, udp.Successes)
+	}
+
+	// 被取消的 TCP 超时不算节点失败：那一轮是被人为中断的。
+	cancelled := ComputeHealth(oldestFirst(
+		sampleTCP(true, 80, model.ServiceSoftEther, 3*time.Hour),
+		func() model.ProbeSample {
+			s := sampleTCP(false, 0, model.ServiceTimeout, time.Hour)
+			s.Cancelled = true
+			return s
+		}(),
+	), 8)
+	if cancelled.Alive != nil {
+		t.Errorf("被取消的探测不该出结论，实得 Alive=%v", *cancelled.Alive)
+	}
+}
+
+// TCP 握手超时算明确否定：tcp_timeout_seconds 就是「能不能用」的门槛，
+// 在门槛内连不上的端口就是不可用，不该挂在「说不清」里白占探测额度。
+// 连续两次才升格为 down（单次是抖动）。
+func TestComputeHealthTCPTimeoutIsDown(t *testing.T) {
+	h := ComputeHealth(oldestFirst(
+		sampleTCP(true, 80, model.ServiceSoftEther, 3*time.Hour),
+		sampleTCP(false, 0, model.ServiceTimeout, 2*time.Hour),
+		sampleTCP(false, 0, model.ServiceTimeout, time.Hour),
+	), 8)
+	if h.Alive == nil || *h.Alive {
+		t.Errorf("连续 TCP 超时应判定不可达，实得 %v", h.Alive)
+	}
+	if model.HealthLevel(h) != "down" {
+		t.Errorf("level = %s，期望 down", model.HealthLevel(h))
+	}
+	if h.FailStreak != 2 {
+		t.Errorf("连续失败数 = %d，期望 2", h.FailStreak)
+	}
+
+	// 只超时一次：抖动，不是不可达。
+	once := ComputeHealth(oldestFirst(
+		sampleTCP(true, 80, model.ServiceSoftEther, 3*time.Hour),
+		sampleTCP(false, 0, model.ServiceTimeout, time.Hour),
+	), 8)
+	if model.HealthLevel(once) != "flaky" {
+		t.Errorf("level = %s，期望 flaky", model.HealthLevel(once))
+	}
+
+	// 升级前存的历史样本没有 proto：超时按「说不清」处理，不追溯定罪。
+	legacy := ComputeHealth(oldestFirst(
+		sample(false, 0, model.ServiceTimeout, "TCP 握手超时", 2*time.Hour),
+		sample(false, 0, model.ServiceTimeout, "TCP 握手超时", time.Hour),
+	), 8)
+	if legacy.Alive != nil {
+		t.Errorf("缺 proto 的老样本不该被判死，实得 Alive=%v", *legacy.Alive)
 	}
 }
 
@@ -259,7 +316,7 @@ func TestApplyRefreshKeepsNodesMissingFromLatest(t *testing.T) {
 }
 
 // 提前淘汰（对齐 mirror）：缺席满 AbsentFor 且连续 FailRounds 轮有效探测明确失败。
-// 少一个条件都不能删：刚缺席可能只是官方轮换掉了、超时不算失败、只失败两轮可能
+// 少一个条件都不能删：刚缺席可能只是官方轮换掉了、只失败两轮可能
 // 是网络抖动、UDP 节点本来就攒不出有效失败。
 func TestApplyRefreshPurgesDeadTCPEarly(t *testing.T) {
 	ev := Eviction{KeepDays: 7, AbsentFor: 24 * time.Hour, FailRounds: 3}
@@ -281,7 +338,7 @@ func TestApplyRefreshPurgesDeadTCPEarly(t *testing.T) {
 		ago := time.Duration(i) * time.Hour
 		feedProbe(t, s, "v1:dead", false, 0, model.ServiceRefused, ago)
 		feedProbe(t, s, "v1:udpd", false, 0, model.ServiceRefused, ago)
-		feedProbe(t, s, "v1:timeout", false, 0, model.ServiceTimeout, ago) // 超时：不算失败
+		feedProbe(t, s, "v1:timeout", false, 0, model.ServiceTimeout, ago) // TCP 超时：跟拒接一样算明确失败
 		if i >= 2 {
 			feedProbe(t, s, "v1:two", false, 0, model.ServiceRefused, ago)  // 只失败两轮
 			feedProbe(t, s, "v1:back", false, 0, model.ServiceRefused, ago) // 头两轮失败
@@ -298,7 +355,7 @@ func TestApplyRefreshPurgesDeadTCPEarly(t *testing.T) {
 	s.UpdateFailRounds(time.Now().UTC().Add(-11*time.Minute), false)
 
 	for id, want := range map[string]int{
-		"v1:dead": 3, "v1:two": 2, "v1:timeout": 0, "v1:udpd": 3, "v1:alive": 0, "v1:back": 0,
+		"v1:dead": 3, "v1:two": 2, "v1:timeout": 3, "v1:udpd": 3, "v1:alive": 0, "v1:back": 0,
 	} {
 		if n, _ := s.Get(id); n.DownRounds != want {
 			t.Errorf("%s 连续失败轮数 = %d，期望 %d", id, n.DownRounds, want)
@@ -336,15 +393,17 @@ func TestApplyRefreshPurgesDeadTCPEarly(t *testing.T) {
 	s.mu.Unlock()
 
 	diff := applyEv(t, s, ev, live)
-	if diff.Purged != 1 {
-		t.Errorf("提前淘汰 %d 个，期望只淘汰 v1:dead 一个", diff.Purged)
+	if diff.Purged != 2 {
+		t.Errorf("提前淘汰 %d 个，期望 v1:dead（拒接）和 v1:timeout（TCP 超时）两个", diff.Purged)
 	}
-	if _, ok := s.Get("v1:dead"); ok {
-		t.Error("缺席满 24h 且连续 3 轮明确失败的 TCP 节点该被清掉")
+	for _, id := range []string{"v1:dead", "v1:timeout"} {
+		if _, ok := s.Get(id); ok {
+			t.Errorf("%s：缺席满 24h 且连续 3 轮明确失败的 TCP 节点该被清掉", id)
+		}
 	}
-	for _, id := range []string{"v1:two", "v1:timeout", "v1:udpd", "v1:alive", "v1:back"} {
+	for _, id := range []string{"v1:two", "v1:udpd", "v1:alive", "v1:back"} {
 		if _, ok := s.Get(id); !ok {
-			t.Errorf("%s 不该被删（只失败两轮 / 全是超时 / UDP / 没失败过 / 最后一轮连上了）", id)
+			t.Errorf("%s 不该被删（只失败两轮 / UDP 不提前剔 / 没失败过 / 最后一轮连上了）", id)
 		}
 	}
 
